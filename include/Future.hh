@@ -4,10 +4,13 @@
 
 #include <any>
 #include <concepts>
+#include <fmt/core.h>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include <typeinfo>
 
 #include <function2/function2.hpp>
 
@@ -89,6 +92,10 @@ public:
         if (future)
         {
             // asm("int3");
+            if (!future->ready)
+            {
+                std::cerr << fmt::format("Warning: Broken promise of type {} at {}\n", typeid(Future<Value>).name(), fmt::ptr(future));
+            }
             future->promise = nullptr;
         }
     }
