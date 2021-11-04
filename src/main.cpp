@@ -1,10 +1,14 @@
+#include <chrono>
 #include <fmt/core.h>
 #include <functional>
 #include <iostream>
 #include <memory>
 
 #include "EventLoop.hh"
+#include "Semaphore.hh"
 #include <Future.hh>
+
+using namespace std::chrono_literals;
 
 std::function<void(void)> a;
 fu2::unique_function<void(void)> then_body;
@@ -75,6 +79,33 @@ int main(void)
         return make_ready_future(test).then([](ConstructorTest x){
             fmt::print("{}\n", fmt::ptr(&x));
         }); });
+
+    loop.call_later(
+        [&loop]()
+        {
+            fmt::print("3s later\n");
+
+            std::shared_ptr<Semaphore> sem = std::make_shared<Semaphore>(1);
+
+            for (int i = 0; i < 10; i++)
+            {
+                loop.call_later(
+                    [sem, i, &loop]()
+                    {
+                        fmt::print("+{}\n", i);
+                        return sem->wait().then(
+                            [sem, i, &loop]()
+                            {
+                                std::cerr << fmt::format("-{}\n", i);
+                                loop.call_later([sem]()
+                                                { sem->signal(); },
+                                                1s);
+                            });
+                    },
+                    1s);
+            }
+        },
+        3s);
 
     loop.run_inplace();
 

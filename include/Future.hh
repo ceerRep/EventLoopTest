@@ -7,6 +7,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <type_traits>
 #include <typeinfo>
 #include <utility>
@@ -131,8 +132,14 @@ public:
         {
             future->value = std::make_shared<Value>(std::forward<V>(value));
             future->ready = true;
+
             future->try_enqueue();
+
+            future->promise = nullptr;
+            future = nullptr;
         }
+        else
+            std::cerr << "Warning: trying to resolve a promise without future\n";
     }
 
     template <typename V = Value>
@@ -141,8 +148,14 @@ public:
         if (future)
         {
             future->ready = true;
+
             future->try_enqueue();
+
+            future->promise = nullptr;
+            future = nullptr;
         }
+        else
+            std::cerr << "Warning: trying to resolve a promise without future\n";
     }
 };
 
@@ -226,21 +239,20 @@ inline Future<Value> &Future<Value>::operator=(Future<Value> &&fut)
     return *this;
 }
 
-template <typename Func,
-          std::enable_if_t<
-              std::is_base_of_v<FutureBase, std::invoke_result_t<Func>>,
-              bool>>
-void Eventloop::call_soon(Func &&func_)
+template <typename Func>
+fu2::unique_function<void(void)> Eventloop::future_function_transform(Func &&func_)
 {
-    call_soon(
-        [func = std::forward<Func>(func_), this]() mutable -> void
-        {
+    return std::move([func = std::forward<Func>(func_), this]() mutable -> void
+                     {
             auto fut = func();
             using Result_t = typename decltype(fut)::value_type;
 
             std::shared_ptr<Future<void>> sp = std::make_shared<Future<void>>();
 
-            pending_futures.insert(sp);
+            {
+                std::lock_guard guard{ pending_future_lock };
+                pending_futures.insert(sp);
+            }
 
             if constexpr (!std::is_void_v<Result_t>)
             {
@@ -248,6 +260,7 @@ void Eventloop::call_soon(Func &&func_)
                     fut.then(
                         [this, sp](Result_t)
                         {
+                            std::lock_guard guard{ pending_future_lock };
                             pending_futures.erase(sp);
                         }));
             }
@@ -257,10 +270,28 @@ void Eventloop::call_soon(Func &&func_)
                     fut.then(
                         [this, sp]()
                         {
+                            std::lock_guard guard{ pending_future_lock };
                             pending_futures.erase(sp);
                         }));
-            }
-        });
+            } });
+}
+
+template <typename Func,
+          std::enable_if_t<
+              std::is_base_of_v<FutureBase, std::invoke_result_t<Func>>,
+              bool>>
+void Eventloop::call_soon(Func &&func_)
+{
+    call_soon(std::move(future_function_transform<Func>(std::forward<Func>(func_))));
+}
+
+template <typename Func, typename Duration,
+          std::enable_if_t<
+              std::is_base_of_v<FutureBase, std::invoke_result_t<Func>>,
+              bool>>
+void Eventloop::call_later(Func &&func_, Duration duration)
+{
+    call_later(std::move(future_function_transform<Func>(std::forward<Func>(func_))), duration);
 }
 
 template <typename T, typename Value = std::remove_reference_t<T>>
