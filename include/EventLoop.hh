@@ -43,8 +43,8 @@ class Eventloop
         pending_timepoints;
     std::list<fu2::unique_function<void(void)>> queue;
 
-    template <typename Func>
-    fu2::unique_function<void(void)> future_function_transform(Func &&func);
+    template <typename Func, typename ...Args>
+    friend auto future_function_transform(Func &&func);
 
 public:
     Eventloop(int index) : index(index) {}
@@ -132,7 +132,7 @@ public:
 
     static inline Eventloop &get_loop(int index)
     {
-        return *loops[index];
+        return *loops[index < 0 ? 0 : index];
     }
 };
 

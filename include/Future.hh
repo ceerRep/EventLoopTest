@@ -49,6 +49,9 @@ class Future : public FutureBase
         }
     }
 
+    template <typename Func, typename... V>
+    auto generate_future_chain(Func &&body);
+
     template <typename Value1>
     friend class Promise;
 
@@ -68,8 +71,8 @@ public:
 
     Future &operator=(Future &&fut);
 
-    template <typename F>
-    Future<invoke_helper_t<F, Value>> then(F &&body);
+    template <typename Func>
+    auto then(Func &&body);
 };
 
 template <typename Value>
@@ -171,53 +174,107 @@ inline Future<Value>::~Future()
     }
 }
 
-template <typename Value>
-template <typename F>
-inline Future<invoke_helper_t<F, Value>> Future<Value>::then(F &&body)
+template <typename Func, typename... Args>
+auto future_function_transform(Func &&func_)
 {
-    using RetType = invoke_helper_t<F, Value>;
-
-    auto spfuture = std::make_shared<Future>(std::move(*this));
-
-    Promise<RetType> promise;
-    Future<RetType> future = promise.get_future();
-
-    if constexpr (!std::is_void_v<Value>)
-    {
-        spfuture->then_body = std::move(
-            [promise = std::move(promise),
-             body = std::forward<F>(body)](Value value) mutable
+    using RetType = typename std::invoke_result_t<Func, Args...>::value_type;
+    return fu2::unique_function<RetType(Args...)>(
+        std::move(
+            [func = std::forward<Func>(func_), &loop = Eventloop::get_loop(Eventloop::get_cpu_index())](Args... args) mutable -> void
             {
+                auto fut = func(args...);
+
+                std::shared_ptr<Future<void>> sp = std::make_shared<Future<void>>();
+
+                {
+                    std::lock_guard guard{loop.pending_future_lock};
+                    loop.pending_futures.insert(sp);
+                }
+
                 if constexpr (!std::is_void_v<RetType>)
-                    promise.resolve(body(std::move(value)));
+                {
+                    (*sp) = std::move(
+                        fut.then(
+                            [&loop, sp](RetType)
+                            {
+                                std::lock_guard guard{loop.pending_future_lock};
+                                loop.pending_futures.erase(sp);
+                            }));
+                }
                 else
                 {
-                    body(std::move(value));
-                    promise.resolve();
+                    (*sp) = std::move(
+                        fut.then(
+                            [&loop, sp]()
+                            {
+                                std::lock_guard guard{loop.pending_future_lock};
+                                loop.pending_futures.erase(sp);
+                            }));
                 }
-            });
-    }
-    else
-    {
-        spfuture->then_body = std::move(
-            [promise = std::move(promise),
-             body = std::forward<F>(body)]() mutable
+            }));
+}
+
+template <typename Value>
+template <typename Func, typename... V>
+auto Future<Value>::generate_future_chain(Func &&body)
+{
+    using RetType = invoke_helper_t<Func, Value>;
+    using RealRetType = remove_future_t<RetType>;
+
+    auto spfuture = std::make_shared<Future<Value>>(std::move(*this));
+
+    Promise<RealRetType> promise;
+    Future<RealRetType> future = promise.get_future();
+    spfuture->then_body = std::move(
+        [promise = std::move(promise),
+         body = std::forward<Func>(body)](V... args) mutable
+        {
+            if constexpr (std::is_base_of_v<FutureBase, RetType>)
             {
-                if constexpr (!std::is_void_v<RetType>)
-                    promise.resolve(body());
+                if constexpr (!std::is_void_v<RealRetType>)
+                {
+                    auto shared_fut = std::make_shared<Future<void>>();
+                    auto fut_tmp = body(std::move(args)...).then([shared_fut, promise = std::move(promise)](RealRetType v) mutable
+                                                                 { promise.resolve(v); });
+                    *shared_fut = std::move(fut_tmp);
+                }
                 else
                 {
-                    body();
+                    auto shared_fut = std::make_shared<Future<void>>();
+                    auto fut_tmp = body(std::move(args)...).then([shared_fut, promise = std::move(promise)]() mutable
+                                                                 { promise.resolve(); });
+                    *shared_fut = std::move(fut_tmp);
+                }
+            }
+            else
+            {
+                if constexpr (!std::is_void_v<RealRetType>)
+                {
+                    promise.resolve(body(std::move(args)...));
+                }
+                else
+                {
+                    body(std::move(args)...);
                     promise.resolve();
                 }
-            });
-    }
+            }
+        });
 
     future.prev_future = spfuture;
 
     spfuture->try_enqueue();
 
     return future;
+}
+
+template <typename Value>
+template <typename Func>
+inline auto Future<Value>::then(Func &&body)
+{
+    if constexpr (std::is_void_v<Value>)
+        return std::move(generate_future_chain<Func>(std::forward<Func>(body)));
+    else
+        return std::move(generate_future_chain<Func, Value>(std::forward<Func>(body)));
 }
 
 template <typename Value>
@@ -240,8 +297,11 @@ inline Future<Value> &Future<Value>::operator=(Future<Value> &&fut)
     return *this;
 }
 
-inline Future<void> when_all(Future<void> *begin, Future<void> *end)
+template <typename Iterator>
+Future<void> when_all(Iterator begin, Iterator end)
 {
+    static_assert(std::is_same_v<std::remove_reference_t<decltype(*begin)>, Future<void>>, "Iterator should point to Future<void>");
+
     auto vct = std::make_shared<std::vector<Future<void>>>();
 
     while (begin != end)
@@ -267,43 +327,6 @@ inline Future<void> when_all(Future<void> *begin, Future<void> *end)
     }
 
     return promise->get_future();
-}
-
-template <typename Func>
-fu2::unique_function<void(void)> Eventloop::future_function_transform(Func &&func_)
-{
-    return std::move([func = std::forward<Func>(func_), this]() mutable -> void
-                     {
-            auto fut = func();
-            using Result_t = typename decltype(fut)::value_type;
-
-            std::shared_ptr<Future<void>> sp = std::make_shared<Future<void>>();
-
-            {
-                std::lock_guard guard{ pending_future_lock };
-                pending_futures.insert(sp);
-            }
-
-            if constexpr (!std::is_void_v<Result_t>)
-            {
-                (*sp) = std::move(
-                    fut.then(
-                        [this, sp](Result_t)
-                        {
-                            std::lock_guard guard{ pending_future_lock };
-                            pending_futures.erase(sp);
-                        }));
-            }
-            else
-            {
-                (*sp) = std::move(
-                    fut.then(
-                        [this, sp]()
-                        {
-                            std::lock_guard guard{ pending_future_lock };
-                            pending_futures.erase(sp);
-                        }));
-            } });
 }
 
 template <typename Func,
@@ -341,6 +364,20 @@ inline Future<void> make_ready_future()
     promise.resolve();
 
     return fut;
+}
+
+template <typename Duration>
+inline Future<void> async_sleep(Duration duration)
+{
+    auto promise = Promise<void>();
+    auto future = promise.get_future();
+
+    Eventloop::get_loop(Eventloop::get_cpu_index())
+        .call_later([promise = std::move(promise)]() mutable
+                    { promise.resolve(); },
+                    duration);
+
+    return std::move(future);
 }
 
 #endif

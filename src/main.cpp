@@ -121,8 +121,13 @@ int main(void)
 
             return when_all(futs, futs + 10)
                 .then(
-                    []()
-                    { fmt::print("All done\n"); });
+                    [_ = ConstructorTest()]()
+                    {
+                        fmt::print("All done\n");
+                        return async_sleep(3s);
+                    })
+                .then([_ = ConstructorTest()]()
+                      { fmt::print("Sleep test done\n"); });
         },
         3s);
 
