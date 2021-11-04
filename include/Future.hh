@@ -3,14 +3,13 @@
 #define _FUTURE_HH
 
 #include <any>
-#include <concepts>
 #include <fmt/core.h>
 #include <functional>
 #include <iostream>
 #include <memory>
 #include <type_traits>
-#include <utility>
 #include <typeinfo>
+#include <utility>
 
 #include <function2/function2.hpp>
 
@@ -42,7 +41,7 @@ class Future : public FutureBase
                 .call_soon([body = std::move(then_body), value = std::move(value)]() mutable
                            { 
                                if constexpr (!std::is_void_v<Value>)
-                               body(*value); 
+                               body(std::move(*value)); 
                                else
                                body(); });
         }
@@ -50,6 +49,9 @@ class Future : public FutureBase
 
     template <typename Value1>
     friend class Promise;
+
+    template <typename Value1>
+    friend class Future;
 
 public:
     using value_type = Value;
@@ -75,6 +77,9 @@ class Promise
 
     template <typename Value1>
     friend class Future;
+
+    template <typename Value1>
+    friend class Promise;
 
 public:
     using value_type = Value;
@@ -120,15 +125,13 @@ public:
     }
 
     template <typename V = Value>
-    std::enable_if_t<!std::is_void_v<V>, void> resolve(V value)
+    std::enable_if_t<!std::is_void_v<V>, void> resolve(V &&value)
     {
         if (future)
         {
-            future->value = std::make_shared<Value>(std::move(value));
+            future->value = std::make_shared<Value>(std::forward<V>(value));
             future->ready = true;
             future->try_enqueue();
-
-            future = nullptr;
         }
     }
 
@@ -139,8 +142,6 @@ public:
         {
             future->ready = true;
             future->try_enqueue();
-
-            future = nullptr;
         }
     }
 };
@@ -160,27 +161,47 @@ template <typename Value>
 template <typename F>
 inline Future<invoke_helper_t<F, Value>> Future<Value>::then(F &&body)
 {
+    using RetType = invoke_helper_t<F, Value>;
+
     auto spfuture = std::make_shared<Future>(std::move(*this));
 
-    Promise<Value> promise;
-    Future<invoke_helper_t<F, Value>> future = promise.get_future();
+    Promise<RetType> promise;
+    Future<RetType> future = promise.get_future();
 
     if constexpr (!std::is_void_v<Value>)
+    {
         spfuture->then_body = std::move(
             [promise = std::move(promise),
              body = std::move(body)](Value value) mutable
-            { promise.resolve(body(value)); });
+            {
+                if constexpr (!std::is_void_v<RetType>)
+                    promise.resolve(body(std::move(value)));
+                else
+                {
+                    body(std::move(value));
+                    promise.resolve();
+                }
+            });
+    }
     else
     {
         spfuture->then_body = std::move(
             [promise = std::move(promise),
              body = std::move(body)]() mutable
-            { body(); promise.resolve(); });
+            {
+                if constexpr (!std::is_void_v<RetType>)
+                    promise.resolve(body());
+                else
+                {
+                    body();
+                    promise.resolve();
+                }
+            });
     }
 
     future.prev_future = spfuture;
 
-    try_enqueue();
+    spfuture->try_enqueue();
 
     return future;
 }
@@ -240,6 +261,16 @@ void Eventloop::call_soon(Func &&func_)
                         }));
             }
         });
+}
+
+template <typename T, typename Value = std::remove_reference_t<T>>
+Future<Value> make_ready_future(T &&value)
+{
+    Promise<Value> promise;
+    auto fut = promise.get_future();
+    promise.resolve(std::forward<T>(value));
+
+    return fut;
 }
 
 #endif

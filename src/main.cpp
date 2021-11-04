@@ -1,3 +1,4 @@
+#include <fmt/core.h>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -5,10 +6,26 @@
 #include "EventLoop.hh"
 #include <Future.hh>
 
-// TODO: warning broken promise
-
 std::function<void(void)> a;
 fu2::unique_function<void(void)> then_body;
+
+struct ConstructorTest
+{
+    ConstructorTest()
+    {
+        fmt::print("Normal contrust\n");
+    }
+
+    ConstructorTest(const ConstructorTest &)
+    {
+        fmt::print("Copy construct\n");
+    }
+
+    ConstructorTest(ConstructorTest &&)
+    {
+        fmt::print("Move construct\n");
+    }
+};
 
 int main(void)
 {
@@ -45,14 +62,19 @@ int main(void)
 
             p2 = std::move(p1);
 
-            return p3.get_future().then([](){
-                std::cout << "Test" << std::endl;
-            });
-
+            return p3.get_future().then([]()
+                                        { std::cout << "Test" << std::endl; });
         });
 
     loop.call_soon([&p2]()
                    { p2.resolve(1919810); });
+
+    loop.call_soon([]()
+                   {
+        ConstructorTest test;
+        return make_ready_future(test).then([](ConstructorTest x){
+            fmt::print("{}\n", fmt::ptr(&x));
+        }); });
 
     loop.run_inplace();
 
