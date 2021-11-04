@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-set(_project_name async-layer-test)
+set(_project_name event-loop)
 
 project(${_project_name} C CXX)
 
@@ -17,15 +17,19 @@ find_package(fmt)
 link_libraries(fmt::fmt)
 
 add_subdirectory(function2)
-# function2 provides an interface target which makes it's
-# headers available to all projects using function2
-
+link_libraries(function2)
 
 include_directories("${CMAKE_SOURCE_DIR}/include")
 
-add_executable (async-layer-test 
+add_executable (event-loop-test 
     src/cpu.cpp
     src/main.cpp
 )
 
-target_link_libraries(async-layer-test function2)
+add_executable (async-model-test 
+    test/src/main.cpp
+)
+
+target_include_directories (async-model-test
+    PUBLIC "${CMAKE_SOURCE_DIR}/test/include"
+)
