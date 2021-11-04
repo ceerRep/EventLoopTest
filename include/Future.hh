@@ -191,25 +191,24 @@ auto future_function_transform(Func &&func_)
                     loop.pending_futures.insert(sp);
                 }
 
-                if constexpr (!std::is_void_v<RetType>)
+                auto inner_lambda = [&](auto... rs) mutable
                 {
                     (*sp) = std::move(
                         fut.then(
-                            [&loop, sp](RetType)
+                            [&loop, sp](std::remove_pointer_t<decltype(rs)>...)
                             {
                                 std::lock_guard guard{loop.pending_future_lock};
                                 loop.pending_futures.erase(sp);
                             }));
+                };
+
+                if constexpr (!std::is_void_v<RetType>)
+                {
+                    inner_lambda((RetType *)nullptr);
                 }
                 else
                 {
-                    (*sp) = std::move(
-                        fut.then(
-                            [&loop, sp]()
-                            {
-                                std::lock_guard guard{loop.pending_future_lock};
-                                loop.pending_futures.erase(sp);
-                            }));
+                    inner_lambda();
                 }
             }));
 }
@@ -231,19 +230,23 @@ auto Future<Value>::generate_future_chain(Func &&body)
         {
             if constexpr (std::is_base_of_v<FutureBase, RetType>)
             {
-                if constexpr (!std::is_void_v<RealRetType>)
+                auto inner_lambda = [&](auto... vs) mutable
                 {
                     auto shared_fut = std::make_shared<Future<void>>();
-                    auto fut_tmp = body(std::move(args)...).then([shared_fut, promise = std::move(promise)](RealRetType v) mutable
-                                                                 { promise.resolve(v); });
+                    auto fut_tmp =
+                        body(std::move(args)...)
+                            .then(
+                                [shared_fut, promise = std::move(promise)](std::remove_pointer_t<decltype(vs)>... vs1) mutable
+                                { promise.resolve(vs1...); });
                     *shared_fut = std::move(fut_tmp);
+                };
+                if constexpr (!std::is_void_v<RealRetType>)
+                {
+                    inner_lambda((RealRetType *)nullptr);
                 }
                 else
                 {
-                    auto shared_fut = std::make_shared<Future<void>>();
-                    auto fut_tmp = body(std::move(args)...).then([shared_fut, promise = std::move(promise)]() mutable
-                                                                 { promise.resolve(); });
-                    *shared_fut = std::move(fut_tmp);
+                    inner_lambda();
                 }
             }
             else
