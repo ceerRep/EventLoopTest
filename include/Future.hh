@@ -172,7 +172,7 @@ inline Future<invoke_helper_t<F, Value>> Future<Value>::then(F &&body)
     {
         spfuture->then_body = std::move(
             [promise = std::move(promise),
-             body = std::move(body)](Value value) mutable
+             body = std::forward<F>(body)](Value value) mutable
             {
                 if constexpr (!std::is_void_v<RetType>)
                     promise.resolve(body(std::move(value)));
@@ -187,7 +187,7 @@ inline Future<invoke_helper_t<F, Value>> Future<Value>::then(F &&body)
     {
         spfuture->then_body = std::move(
             [promise = std::move(promise),
-             body = std::move(body)]() mutable
+             body = std::forward<F>(body)]() mutable
             {
                 if constexpr (!std::is_void_v<RetType>)
                     promise.resolve(body());
@@ -233,7 +233,7 @@ template <typename Func,
 void Eventloop::call_soon(Func &&func_)
 {
     call_soon(
-        [func = std::move(func_), this]() mutable -> void
+        [func = std::forward<Func>(func_), this]() mutable -> void
         {
             auto fut = func();
             using Result_t = typename decltype(fut)::value_type;
@@ -269,6 +269,15 @@ Future<Value> make_ready_future(T &&value)
     Promise<Value> promise;
     auto fut = promise.get_future();
     promise.resolve(std::forward<T>(value));
+
+    return fut;
+}
+
+inline Future<void> make_ready_future()
+{
+    Promise<void> promise;
+    auto fut = promise.get_future();
+    promise.resolve();
 
     return fut;
 }

@@ -16,9 +16,9 @@
 
 #include <function2/function2.hpp>
 
+#include "FutureBase.hh"
 #include "cpu.hh"
 #include "spinlock.hh"
-#include "FutureBase.hh"
 
 template <typename R>
 class Future;
@@ -109,7 +109,7 @@ void Eventloop::call_soon(F &&func)
             throw std::invalid_argument(fmt::format("Call in wrong thread, should be {}, get {}", index, cpu_ind));
 
     std::lock_guard guard{lock};
-    queue.emplace_back(std::move(func));
+    queue.emplace_back(std::forward<F>(func));
 }
 
 #endif
