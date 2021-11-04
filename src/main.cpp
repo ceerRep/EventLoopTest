@@ -1,5 +1,6 @@
 #include <chrono>
 #include <fmt/core.h>
+#include <fmt/format.h>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -15,19 +16,28 @@ fu2::unique_function<void(void)> then_body;
 
 struct ConstructorTest
 {
-    ConstructorTest()
+    bool flag;
+
+    ConstructorTest() : flag(true)
     {
         fmt::print("Normal contrust\n");
     }
 
-    ConstructorTest(const ConstructorTest &)
+    ConstructorTest(const ConstructorTest &r) : flag(r.flag)
     {
         fmt::print("Copy construct\n");
     }
 
-    ConstructorTest(ConstructorTest &&)
+    ConstructorTest(ConstructorTest &&r) : flag(r.flag)
     {
+        r.flag = false;
         fmt::print("Move construct\n");
+    }
+
+    ~ConstructorTest()
+    {
+        if (flag)
+            fmt::print("Destruct\n");
     }
 };
 
@@ -86,17 +96,21 @@ int main(void)
             fmt::print("3s later\n");
 
             std::shared_ptr<Semaphore> sem = std::make_shared<Semaphore>(1);
+            Future<void> futs[10];
 
             for (int i = 0; i < 10; i++)
             {
+                auto promise = Promise<void>();
+                futs[i] = promise.get_future();
                 loop.call_later(
-                    [sem, i, &loop]()
+                    [sem, i, &loop, promise = std::move(promise)]() mutable
                     {
                         fmt::print("+{}\n", i);
                         return sem->wait().then(
-                            [sem, i, &loop]()
+                            [sem, i, &loop, promise = std::move(promise), tester = ConstructorTest()]() mutable
                             {
-                                std::cerr << fmt::format("-{}\n", i);
+                                std::cerr << fmt::format("-{} {}\n", i, fmt::ptr(&tester));
+                                promise.resolve();
                                 loop.call_later([sem]()
                                                 { sem->signal(); },
                                                 1s);
@@ -104,6 +118,11 @@ int main(void)
                     },
                     1s);
             }
+
+            return when_all(futs, futs + 10)
+                .then(
+                    []()
+                    { fmt::print("All done\n"); });
         },
         3s);
 

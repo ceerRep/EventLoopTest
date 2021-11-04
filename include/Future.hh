@@ -13,6 +13,7 @@
 #include <utility>
 
 #include <function2/function2.hpp>
+#include <vector>
 
 #include "EventLoop.hh"
 #include "FutureBase.hh"
@@ -39,12 +40,12 @@ class Future : public FutureBase
         if (ready && then_body)
         {
             Eventloop::get_loop(Eventloop::get_cpu_index())
-                .call_soon([body = std::move(then_body), value = std::move(value)]() mutable
+                .call_soon([body = std::move(then_body), value = std::move(value), prev_fut = std::move(prev_future)]() mutable
                            { 
-                               if constexpr (!std::is_void_v<Value>)
-                               body(std::move(*value)); 
-                               else
-                               body(); });
+                                if constexpr (!std::is_void_v<Value>)
+                                    body(std::move(*value)); 
+                                else
+                                    body(); });
         }
     }
 
@@ -237,6 +238,35 @@ inline Future<Value> &Future<Value>::operator=(Future<Value> &&fut)
         promise->future = this;
 
     return *this;
+}
+
+inline Future<void> when_all(Future<void> *begin, Future<void> *end)
+{
+    auto vct = std::make_shared<std::vector<Future<void>>>();
+
+    while (begin != end)
+    {
+        vct->emplace_back(std::move(*begin));
+        begin++;
+    }
+
+    std::shared_ptr<int> counter = std::make_shared<int>(vct->size());
+    std::shared_ptr<Promise<void>> promise = std::make_shared<Promise<void>>();
+
+    for (auto &fut : *vct)
+    {
+        auto next_fut = fut.then(
+            [counter, promise, vct]()
+            {
+                (*counter)--;
+
+                if (*counter == 0)
+                    promise->resolve();
+            });
+        fut = std::move(next_fut);
+    }
+
+    return promise->get_future();
 }
 
 template <typename Func>
