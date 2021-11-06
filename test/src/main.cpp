@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <fmt/core.h>
 #include <iostream>
 #include <map>
 
@@ -7,6 +8,10 @@
 #include <EventLoop.hh>
 #include <Future.hh>
 #include <Semaphore.hh>
+#include <string>
+#include <thread>
+
+using namespace std::chrono_literals;
 
 struct
 {
@@ -40,14 +45,14 @@ public:
         Promise<std::string> pro;
         auto fut = pro.get_future();
 
-        Eventloop::get_loop(index).call_soon([key, pro = std::move(pro)]() mutable {
+        Eventloop::get_loop(index).call_soon([key, pro = std::move(pro)]() mutable
+                                             {
             auto &bucket = getBucket();
 
             return bucket.sem.wait().then([key, pro = std::move(pro), &bucket]() mutable {
                 pro.resolve(bucket.storage[key]);
                 bucket.sem.signal();
-            });
-        });
+            }); });
 
         return fut;
     }
@@ -59,15 +64,15 @@ public:
         Promise<void> pro;
         auto fut = pro.get_future();
 
-        Eventloop::get_loop(index).call_soon([key, value, pro = std::move(pro)]() mutable {
+        Eventloop::get_loop(index).call_soon([key, value, pro = std::move(pro)]() mutable
+                                             {
             auto &bucket = getBucket();
 
             return bucket.sem.wait().then([key, value, pro = std::move(pro), &bucket]() mutable {
                 bucket.storage[key] = value;
                 pro.resolve();
                 bucket.sem.signal();
-            });
-        });
+            }); });
 
         return fut;
     }
@@ -79,40 +84,69 @@ public:
         Promise<void> pro;
         auto fut = pro.get_future();
 
-        Eventloop::get_loop(index).call_soon([key, pro = std::move(pro)]() mutable {
+        Eventloop::get_loop(index).call_soon([key, pro = std::move(pro)]() mutable
+                                             {
             auto &bucket = getBucket();
 
             return bucket.sem.wait().then([key, pro = std::move(pro), &bucket]() mutable {
                 bucket.storage.erase(key);
                 pro.resolve();
                 bucket.sem.signal();
-            });
-        });
+            }); });
 
         return fut;
     }
 };
 
-#define THREAD_NUM 4
+#define THREAD_NUM 8
+#define N 10000000
 
 int main(void)
 {
     Eventloop::initialize_event_loops(THREAD_NUM);
     StdMapBackend backend(THREAD_NUM);
 
-    Eventloop::get_loop(0).call_soon([&backend](){
-        std::vector<Future<void>> futs;
+    for (int ind = 0; ind < THREAD_NUM; ind++)
+        Eventloop::get_loop(ind)
+            .call_soon(
+                [&backend, ind]()
+                {
+                    std::vector<Future<void>> futs;
 
-        // for (int i = 0; i < 1000; i++)
-        //     futs.emplace_back(std::move(
-        //         backend.set(i, "114514").then(F &&body)
-        //     ))
+                    for (int i = N / THREAD_NUM * ind; i < N / THREAD_NUM * (ind + 1); i++)
+                        futs.emplace_back(std::move(
+                            backend.set(i, std::to_string(i))
+                                .then(
+                                    [i]()
+                                    {
+                                        //   fmt::print("{} Done\n", i);
+                                    })));
 
-    });
+                    return when_all(futs.begin(), futs.end())
+                        .then(
+                            []()
+                            { fmt::print("Load done\n"); })
+                        .then(
+                            [&backend, ind]()
+                            {
+                                std::vector<Future<void>> futs;
 
+                                for (int i = N / THREAD_NUM * ind; i < N / THREAD_NUM * (ind + 1); i++)
+                                    futs.emplace_back(std::move(
+                                        backend.get(i)
+                                            .then(
+                                                [i](std::string s)
+                                                {
+                                                    //   fmt::print("{} {} {} get\n", std::to_string(i) == s, i, s);
+                                                })));
 
-    for (int i = 1; i < THREAD_NUM; i++)
+                                return when_all(futs.begin(), futs.end());
+                            });
+                });
+
+    for (int i = 0; i < THREAD_NUM; i++)
         Eventloop::get_loop(i).run();
-    
-    Eventloop::get_loop(0).run_inplace();
+
+    for (int i = 0; i < THREAD_NUM; i++)
+        Eventloop::get_loop(i).join();
 }
