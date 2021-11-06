@@ -8,6 +8,9 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <new>
+#include <stdexcept>
+#include <tuple>
 #include <type_traits>
 #include <typeinfo>
 #include <utility>
@@ -17,6 +20,8 @@
 
 #include "EventLoop.hh"
 #include "FutureBase.hh"
+#include "spinlock.hh"
+#include "stacktrace.hh"
 #include "util.hh"
 
 template <typename Value>
@@ -25,10 +30,12 @@ class Promise;
 template <typename Value>
 class Future : public FutureBase
 {
+    Spinlock lock;
+
     Promise<Value> *promise;
 
     bool ready;
-    std::shared_ptr<Value> value;
+    void_type_helper_t<Value> value;
 
     std::any prev_future;
     void_function_helper_t<Value> then_body;
@@ -37,13 +44,15 @@ class Future : public FutureBase
 
     void try_enqueue()
     {
+        std::lock_guard lk_this{lock};
+
         if (ready && then_body)
         {
             Eventloop::get_loop(Eventloop::get_cpu_index())
                 .call_soon([body = std::move(then_body), value = std::move(value), prev_fut = std::move(prev_future)]() mutable
                            { 
                                 if constexpr (!std::is_void_v<Value>)
-                                    body(std::move(*value)); 
+                                    body(std::move(value)); 
                                 else
                                     body(); });
         }
@@ -78,6 +87,9 @@ public:
 template <typename Value>
 class Promise
 {
+    Spinlock lock;
+
+    int loopno;
     Future<Value> *future;
 
     template <typename Value1>
@@ -89,7 +101,7 @@ class Promise
 public:
     using value_type = Value;
 
-    Promise() : future(nullptr) {}
+    Promise() : future(nullptr), loopno(Eventloop::get_cpu_index()) {}
     Promise(Promise &&pro)
     {
         *this = std::move(pro);
@@ -104,37 +116,72 @@ public:
             // asm("int3");
             if (!future->ready)
             {
-                std::cerr << fmt::format("Warning: Broken promise of type {} at {}\n", typeid(Future<Value>).name(), fmt::ptr(future));
+                std::cerr << fmt::format("Warning: Broken promise of type {} at {}\nStack trace: \n{}",
+                                         typeid(Future<Value>).name(),
+                                         fmt::ptr(future),
+                                         get_stack_trace());
             }
-            future->promise = nullptr;
         }
     }
 
     Promise &operator=(Promise &&pro)
     {
+        std::unique_lock lk_this(lock, std::defer_lock), lk_pro(pro.lock, std::defer_lock);
+        std::lock(lk_this, lk_pro);
+
         // std::cerr << fmt::format("Promise {} moved from {}, future is {}\n", fmt::ptr(this), fmt::ptr(&pro), fmt::ptr(future));
         future = pro.future;
+        loopno = pro.loopno;
         pro.future = nullptr;
         if (future)
+        {
+            std::unique_lock lk_fut{future->lock, std::defer_lock};
+            lk_fut.lock();
             future->promise = this;
+        }
 
         return *this;
     }
 
     Future<Value> get_future()
     {
+        std::unique_lock lk_this(lock, std::defer_lock);
+        lk_this.lock();
         Future future(this);
         this->future = &future;
 
         return std::move(future);
     }
 
-    template <typename V = Value>
-    std::enable_if_t<!std::is_void_v<V>, void> resolve(V &&value)
+    template <typename... Args>
+    void resolve(Args &&...args)
     {
+        if (loopno == -1)
+            throw std::runtime_error(fmt::format("Invalid loopno: {}", loopno));
+
+        if (int current_loop = Eventloop::get_cpu_index(); loopno != current_loop)
+        {
+            // Submit to correct loop
+            Eventloop::get_loop(loopno).call_soon(
+                [pro = std::move(*this), args = std::tuple(std::move(args)...)]() mutable
+                { std::apply([&pro](auto &&...args) mutable
+                             { pro.resolve(std::move(args)...); },
+                             std::move(args)); });
+
+            return;
+        }
+
+        std::unique_lock lk_this(lock, std::defer_lock);
+        lk_this.lock();
+
         if (future)
         {
-            future->value = std::make_shared<Value>(std::forward<V>(value));
+            std::unique_lock lk_fut{future->lock, std::defer_lock};
+            lk_fut.lock();
+
+            if constexpr (!std::is_void_v<Value>)
+                new (&(future->value)) decltype(future->value){std::forward<Args>(args)...};
+
             future->ready = true;
 
             future->try_enqueue();
@@ -143,23 +190,7 @@ public:
             future = nullptr;
         }
         else
-            std::cerr << "Warning: trying to resolve a promise without future\n";
-    }
-
-    template <typename V = Value>
-    std::enable_if_t<std::is_void_v<V>, void> resolve()
-    {
-        if (future)
-        {
-            future->ready = true;
-
-            future->try_enqueue();
-
-            future->promise = nullptr;
-            future = nullptr;
-        }
-        else
-            std::cerr << "Warning: trying to resolve a promise without future\n";
+            std::cerr << fmt::format("Warning: trying to resolve a promise without future\nStack trace: \n{}", get_stack_trace());
     }
 };
 
@@ -167,50 +198,24 @@ template <typename Value>
 inline Future<Value>::~Future()
 {
     // std::cerr << fmt::format("Future {} destroyed, promise is {}\n", fmt::ptr(this), fmt::ptr(promise));
-    if (promise)
+    while (true)
     {
-        // asm("int3");
-        promise->future = nullptr;
-    }
-}
+        std::unique_lock lk_this{lock, std::defer_lock};
+        lk_this.lock();
 
-template <typename Func, typename... Args>
-auto future_function_transform(Func &&func_)
-{
-    using RetType = typename std::invoke_result_t<Func, Args...>::value_type;
-    return fu2::unique_function<RetType(Args...)>(
-        std::move(
-            [func = std::forward<Func>(func_), &loop = Eventloop::get_loop(Eventloop::get_cpu_index())](Args... args) mutable -> void
+        if (promise)
+        {
+            if (promise->lock.try_lock())
             {
-                auto fut = func(args...);
+                promise->future = nullptr;
+                promise->lock.unlock();
+            }
+            else
+                continue;
+        }
 
-                std::shared_ptr<Future<void>> sp = std::make_shared<Future<void>>();
-
-                {
-                    std::lock_guard guard{loop.pending_future_lock};
-                    loop.pending_futures.insert(sp);
-                }
-
-                auto inner_lambda = [&](auto... rs) mutable
-                {
-                    (*sp) = std::move(
-                        fut.then(
-                            [&loop, sp](std::remove_pointer_t<decltype(rs)>...)
-                            {
-                                std::lock_guard guard{loop.pending_future_lock};
-                                loop.pending_futures.erase(sp);
-                            }));
-                };
-
-                if constexpr (!std::is_void_v<RetType>)
-                {
-                    inner_lambda((RetType *)nullptr);
-                }
-                else
-                {
-                    inner_lambda();
-                }
-            }));
+        break;
+    }
 }
 
 template <typename Value>
@@ -283,21 +288,35 @@ inline auto Future<Value>::then(Func &&body)
 template <typename Value>
 inline Future<Value> &Future<Value>::operator=(Future<Value> &&fut)
 {
-    // std::cerr << fmt::format("Future {} moved from {}, promise is {}\n", fmt::ptr(this), fmt::ptr(&fut), fmt::ptr(fut.promise));
+    while (true)
+    {
+        std::unique_lock lock_this(lock, std::defer_lock), lock_fut(fut.lock, std::defer_lock);
+        std::lock(lock_this, lock_fut);
 
-    promise = fut.promise;
-    ready = fut.ready;
-    value = std::move(fut.value);
-    then_body = std::move(fut.then_body);
-    prev_future = std::move(fut.prev_future);
+        if (fut.promise)
+        {
+            if (!fut.promise->lock.try_lock())
+                continue;
+        }
+        // std::cerr << fmt::format("Future {} moved from {}, promise is {}\n", fmt::ptr(this), fmt::ptr(&fut), fmt::ptr(fut.promise));
 
-    fut.ready = false;
-    fut.promise = nullptr;
+        promise = fut.promise;
+        ready = fut.ready;
+        new (&value) decltype(value){std::move(fut.value)};
+        then_body = std::move(fut.then_body);
+        prev_future = std::move(fut.prev_future);
 
-    if (promise)
-        promise->future = this;
+        fut.ready = false;
+        fut.promise = nullptr;
 
-    return *this;
+        if (promise)
+        {
+            promise->future = this;
+            promise->lock.unlock();
+        }
+
+        return *this;
+    }
 }
 
 template <typename Iterator>
@@ -330,6 +349,45 @@ Future<void> when_all(Iterator begin, Iterator end)
     }
 
     return promise->get_future();
+}
+
+template <typename Func, typename... Args>
+auto future_function_transform(Func &&func_)
+{
+    using RetType = typename std::invoke_result_t<Func, Args...>::value_type;
+    return fu2::unique_function<RetType(Args...)>(
+        std::move(
+            [func = std::forward<Func>(func_), &loop = Eventloop::get_loop(Eventloop::get_cpu_index())](Args... args) mutable -> void
+            {
+                auto fut = func(args...);
+
+                std::shared_ptr<Future<void>> sp = std::make_shared<Future<void>>();
+
+                {
+                    std::lock_guard guard{loop.pending_future_lock};
+                    loop.pending_futures.insert(sp);
+                }
+
+                auto inner_lambda = [&](auto... rs) mutable
+                {
+                    (*sp) = std::move(
+                        fut.then(
+                            [&loop, sp](std::remove_pointer_t<decltype(rs)>...)
+                            {
+                                std::lock_guard guard{loop.pending_future_lock};
+                                loop.pending_futures.erase(sp);
+                            }));
+                };
+
+                if constexpr (!std::is_void_v<RetType>)
+                {
+                    inner_lambda((RetType *)nullptr);
+                }
+                else
+                {
+                    inner_lambda();
+                }
+            }));
 }
 
 template <typename Func,

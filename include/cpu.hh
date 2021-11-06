@@ -2,6 +2,6 @@
 
 #define _CPU_HH
 
-void assignToThisCore(int core_id);
+int assignToThisCore(int core_id);
 
 #endif

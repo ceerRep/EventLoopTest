@@ -4,19 +4,26 @@
 
 #include <any>
 #include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <functional>
+#include <iostream>
 #include <list>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <set>
 #include <thread>
 #include <type_traits>
 #include <vector>
 
+#include <fmt/core.h>
 #include <fmt/format.h>
 
 #include <function2/function2.hpp>
+
+#include <boost/lockfree/queue.hpp>
 
 #include "FutureBase.hh"
 #include "cpu.hh"
@@ -29,22 +36,36 @@ class Eventloop
 {
     inline static thread_local int cpu_ind = -1;
     inline static std::vector<Eventloop *> loops;
+    inline static int32_t active_loop_num;
+
+    std::thread th;
 
     int index;
 
-    Spinlock queue_lock;
+    volatile int to_sleep;
+    std::condition_variable cv;
+    std::mutex cv_m;
 
+    Spinlock queue_lock;
     Spinlock pending_future_lock;
 
     std::set<std::shared_ptr<Future<void>>> pending_futures;
+
     std::multimap<
         std::chrono::time_point<std::chrono::high_resolution_clock>,
         fu2::unique_function<void(void)>>
         pending_timepoints;
-    std::list<fu2::unique_function<void(void)>> queue;
+    std::queue<fu2::unique_function<void(void)>> queue;
 
-    template <typename Func, typename ...Args>
+    template <typename Func, typename... Args>
     friend auto future_function_transform(Func &&func);
+
+    void wake()
+    {
+        std::lock_guard<std::mutex> lk(cv_m);
+        to_sleep = 0;
+        cv.notify_all();
+    }
 
 public:
     Eventloop(int index) : index(index) {}
@@ -75,27 +96,34 @@ public:
 
     void run()
     {
-        std::thread th([this]()
-                       { run_inplace(); });
-        th.detach();
+        th = std::thread([this]()
+                         { run_inplace(); });
     }
 
     void run_inplace()
     {
+        if (int result = assignToThisCore(index); result)
+            std::cerr << fmt::format("Failed to bind cpu core {}, error code: {}\n", index, result);
+
         if (cpu_ind != -1)
             throw std::logic_error(fmt::format("cpu_ind should be -1, get {}", cpu_ind));
         cpu_ind = index;
+
+        __atomic_add_fetch(&active_loop_num, 1, __ATOMIC_SEQ_CST);
+
+        fmt::print("Event loop running on cpu #{}\n", cpu_ind);
 
         while (true)
         {
             decltype(queue)::value_type func;
 
             {
-                std::lock_guard guard{queue_lock};
+                std::unique_lock lock{queue_lock, std::defer_lock};
+                lock.lock();
                 if (queue.size())
                 {
                     func = std::move(queue.front());
-                    queue.pop_front();
+                    queue.pop();
                 }
                 else if (pending_timepoints.size())
                 {
@@ -104,17 +132,49 @@ public:
                     while (pending_timepoints.size() && pending_timepoints.begin()->first <= now)
                     {
                         auto it = pending_timepoints.begin();
-                        queue.push_back(std::move(it->second));
+                        queue.push(std::move(it->second));
                         pending_timepoints.erase(it);
                     }
                 }
                 else
-                    break;
+                {
+                    lock.unlock();
+
+                    if (__atomic_fetch_sub(&active_loop_num, 1, __ATOMIC_SEQ_CST) == 1)
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        using namespace std::chrono_literals;
+
+                        std::unique_lock lk(cv_m, std::defer_lock);
+                        lk.lock();
+                        to_sleep = 1;
+                        cv.wait_for(lk, 1s, [this]
+                                    { return to_sleep != 1; });
+                        if (to_sleep)
+                        {
+                            std::cerr << fmt::format("Loop #{} sleeped\n", index);
+                            cv.wait_for(lk, 1s, [this]
+                                        { return to_sleep != 1; });
+                            std::cerr << fmt::format("Loop #{} waked: {}\n", index, to_sleep ? "timeout" : "notify");
+                        }
+                    }
+
+                    __atomic_add_fetch(&active_loop_num, 1, __ATOMIC_SEQ_CST);
+                }
             }
 
             if (func)
                 func();
         }
+    }
+
+    void join()
+    {
+        if (th.joinable())
+            th.join();
     }
 
     static inline int get_cpu_index()
@@ -124,10 +184,14 @@ public:
 
     static inline void initialize_event_loops(int loop_num)
     {
+        get_loop_id = &get_cpu_index;
+
         loops.resize(loop_num);
 
         for (int i = 0; i < loop_num; i++)
             loops[i] = new Eventloop(i);
+
+        active_loop_num = 0;
     }
 
     static inline Eventloop &get_loop(int index)
@@ -140,7 +204,9 @@ template <typename F, std::enable_if_t<std::is_void_v<std::invoke_result_t<F>>, 
 void Eventloop::call_soon(F &&func)
 {
     std::lock_guard guard{queue_lock};
-    queue.emplace_back(std::forward<F>(func));
+    queue.emplace(std::forward<F>(func));
+
+    wake();
 }
 
 template <typename F, typename Duration,
@@ -152,6 +218,8 @@ void Eventloop::call_later(F &&func, Duration duration)
     std::lock_guard guard{queue_lock};
     auto target_time = std::chrono::high_resolution_clock::now() + duration;
     pending_timepoints.emplace(target_time, std::forward<F>(func));
+
+    wake();
 }
 
 #endif

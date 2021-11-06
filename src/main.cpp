@@ -46,11 +46,9 @@ int main(void)
     Eventloop::initialize_event_loops(1);
     auto &loop = Eventloop::get_loop(0);
 
-    Promise<int> p2;
     Future<int> f2;
-
+    Promise<int> p2;
     Promise<void> p3;
-    Future<void> f3;
 
     loop.call_soon(
         [&]()
@@ -63,6 +61,8 @@ int main(void)
 
             auto p1 = std::move(promise);
             auto f1 = std::move(future);
+
+            p3 = Promise<void>();
 
             f2 = std::move(
                 f1.then(

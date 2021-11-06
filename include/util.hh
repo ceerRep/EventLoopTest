@@ -27,6 +27,21 @@ template <typename Value>
 using void_function_helper_t = decltype(void_function_helper<Value>());
 
 template <typename V>
+struct void_type_helper
+{
+    using type = V;
+};
+
+template <>
+struct void_type_helper<void>
+{
+    using type = int;
+};
+
+template <typename V>
+using void_type_helper_t = typename void_type_helper<V>::type;
+
+template <typename V>
 struct remove_future
 {
     using type = V;

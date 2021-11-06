@@ -8,6 +8,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O1 -g -fno-inline")
+
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
 find_package(Threads REQUIRED)
@@ -21,12 +24,18 @@ link_libraries(function2)
 
 include_directories("${CMAKE_SOURCE_DIR}/include")
 
-add_executable (event-loop-test 
+set (EVENTLOOP_SOURCE
     src/cpu.cpp
+    src/stacktrace.cc
+)
+
+add_executable (event-loop-test 
+    ${EVENTLOOP_SOURCE}
     src/main.cpp
 )
 
 add_executable (async-model-test 
+    ${EVENTLOOP_SOURCE}
     test/src/main.cpp
 )
 
