@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O1 -g -fno-inline")
+# set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O1 -g -fno-inline")
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
@@ -22,11 +22,15 @@ link_libraries(fmt::fmt)
 add_subdirectory(function2)
 link_libraries(function2)
 
+add_subdirectory(mimalloc)
+link_libraries(mimalloc)
+
 include_directories("${CMAKE_SOURCE_DIR}/include")
 
 set (EVENTLOOP_SOURCE
     src/cpu.cpp
     src/stacktrace.cc
+    src/mimalloc-override.cc
 )
 
 add_executable (event-loop-test 
