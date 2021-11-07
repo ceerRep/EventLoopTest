@@ -1,15 +1,17 @@
+#include <chrono>
 #include <cstdint>
 #include <fmt/core.h>
+#include <fstream>
 #include <iostream>
 #include <map>
+#include <string>
+#include <thread>
 
 #include <fmt/format.h>
 
 #include <EventLoop.hh>
 #include <Future.hh>
 #include <Semaphore.hh>
-#include <string>
-#include <thread>
 
 using namespace std::chrono_literals;
 
@@ -36,65 +38,118 @@ class StdMapBackend
     }
 
 public:
+    class Cursor
+    {
+    private:
+        Semaphore *sem;
+        StdMapBackend *backend;
+
+        Cursor(StdMapBackend *backend, Semaphore *sem) : backend(backend), sem(sem) {}
+        friend class StdMapBackend;
+
+    public:
+        Cursor() : backend(nullptr) {}
+        Cursor(const Cursor &) = delete;
+        Cursor(Cursor &&r)
+        {
+            backend = r.backend;
+            sem = r.sem;
+            r.backend = nullptr;
+            r.sem = nullptr;
+        }
+
+        ~Cursor()
+        {
+            if (backend)
+            {
+                sem->signal();
+                // fmt::print("Signaled\n");
+            }
+        }
+
+        Future<std::tuple<Cursor, std::string>> get(uint64_t key)
+        {
+            int index = key % backend->bucket_num;
+
+            Promise<std::tuple<Cursor, std::string>> pro;
+            auto fut = pro.get_future();
+
+            Eventloop::get_loop(index).call_soon(
+                [key, pro = std::move(pro), cursor = std::move(*this)]() mutable
+                {
+                    auto &bucket = getBucket();
+
+                    return bucket.sem.wait().then(
+                        [key, pro = std::move(pro), &bucket, cursor = std::move(cursor)]() mutable
+                        {
+                            pro.resolve(std::move(std::tuple<Cursor, std::string>{std::move(cursor), bucket.storage[key]}));
+                            bucket.sem.signal();
+                        });
+                });
+
+            return fut;
+        }
+
+        Future<Cursor> set(uint64_t key, const std::string &value)
+        {
+            int index = key % backend->bucket_num;
+
+            Promise<Cursor> pro;
+            auto fut = pro.get_future();
+
+            Eventloop::get_loop(index).call_soon(
+                [key, value, pro = std::move(pro), cursor = std::move(*this)]() mutable
+                {
+                    auto &bucket = getBucket();
+
+                    return bucket.sem.wait().then(
+                        [key, value, pro = std::move(pro), &bucket, cursor = std::move(cursor)]() mutable
+                        {
+                            bucket.storage[key] = value;
+                            pro.resolve(std::move(cursor));
+                            bucket.sem.signal();
+                        });
+                });
+
+            return fut;
+        }
+
+        Future<Cursor> remove(uint64_t key)
+        {
+            int index = key % backend->bucket_num;
+
+            Promise<Cursor> pro;
+            auto fut = pro.get_future();
+
+            Eventloop::get_loop(index).call_soon(
+                [key, pro = std::move(pro), cursor = std::move(*this)]() mutable
+                {
+                    auto &bucket = getBucket();
+
+                    return bucket.sem.wait().then(
+                        [key, pro = std::move(pro), &bucket, cursor = std::move(cursor)]() mutable
+                        {
+                            bucket.storage.erase(key);
+                            pro.resolve(std::move(cursor));
+                            bucket.sem.signal();
+                        });
+                });
+
+            return fut;
+        }
+    };
+
     StdMapBackend(int bucket_num) : bucket_num(bucket_num) {}
 
-    Future<std::string> get(uint64_t key)
+    Future<Cursor> get_cursor()
     {
-        int index = key % bucket_num;
-
-        Promise<std::string> pro;
-        auto fut = pro.get_future();
-
-        Eventloop::get_loop(index).call_soon([key, pro = std::move(pro)]() mutable
-                                             {
-            auto &bucket = getBucket();
-
-            return bucket.sem.wait().then([key, pro = std::move(pro), &bucket]() mutable {
-                pro.resolve(bucket.storage[key]);
-                bucket.sem.signal();
-            }); });
-
-        return fut;
-    }
-
-    Future<void> set(uint64_t key, const std::string &value)
-    {
-        int index = key % bucket_num;
-
-        Promise<void> pro;
-        auto fut = pro.get_future();
-
-        Eventloop::get_loop(index).call_soon([key, value, pro = std::move(pro)]() mutable
-                                             {
-            auto &bucket = getBucket();
-
-            return bucket.sem.wait().then([key, value, pro = std::move(pro), &bucket]() mutable {
-                bucket.storage[key] = value;
-                pro.resolve();
-                bucket.sem.signal();
-            }); });
-
-        return fut;
-    }
-
-    Future<void> remove(uint64_t key)
-    {
-        int index = key % bucket_num;
-
-        Promise<void> pro;
-        auto fut = pro.get_future();
-
-        Eventloop::get_loop(index).call_soon([key, pro = std::move(pro)]() mutable
-                                             {
-            auto &bucket = getBucket();
-
-            return bucket.sem.wait().then([key, pro = std::move(pro), &bucket]() mutable {
-                bucket.storage.erase(key);
-                pro.resolve();
-                bucket.sem.signal();
-            }); });
-
-        return fut;
+        static thread_local Semaphore pending{16};
+        return pending.wait()
+            .then(
+                [this]()
+                {
+                    return Cursor(this, &pending);
+                });
     }
 };
 
@@ -103,46 +158,123 @@ public:
 
 int main(void)
 {
+    std::vector<int64_t> latencies(N);
+
     Eventloop::initialize_event_loops(THREAD_NUM);
     StdMapBackend backend(THREAD_NUM);
 
-    for (int ind = 0; ind < THREAD_NUM; ind++)
-        Eventloop::get_loop(ind)
-            .call_soon(
-                [&backend, ind]()
-                {
-                    std::vector<Future<void>> futs;
+    Eventloop::get_loop(0).call_soon(
+        [&]()
+        {
+            std::vector<Future<void>> futures;
 
-                    for (int i = N / THREAD_NUM * ind; i < N / THREAD_NUM * (ind + 1); i++)
-                        futs.emplace_back(std::move(
-                            backend.set(i, std::to_string(i))
+            for (int ind = 0; ind < THREAD_NUM; ind++)
+                futures.emplace_back(std::move(
+                    submit_to(
+                        ind,
+                        [&backend, ind]()
+                        {
+                            std::vector<Future<void>> futs;
+
+                            for (int i = N / THREAD_NUM * ind; i < N / THREAD_NUM * (ind + 1); i++)
+                                futs.emplace_back(std::move(
+                                    backend.get_cursor().then(
+                                        [i](StdMapBackend::Cursor cursor) mutable
+                                        {
+                                            return cursor.set(i, std::to_string(i)).then([](auto) {});
+                                        })));
+
+                            return when_all(futs.begin(), futs.end())
                                 .then(
-                                    [i]()
+                                    [ind]()
+                                    { fmt::print("#{} Load done\n", ind); });
+                        })));
+
+            return when_all(futures.begin(), futures.end())
+                .then(
+                    []()
+                    {
+                        fmt::print("All Load done\n");
+                    })
+                .then(
+                    [&backend, &latencies]()
+                    {
+                        std::vector<Future<void>> futures;
+                        for (int ind = 0; ind < THREAD_NUM; ind++)
+                            futures.emplace_back(
+                                submit_to(
+                                    ind,
+                                    [&backend, ind, &latencies]()
                                     {
-                                        //   fmt::print("{} Done\n", i);
-                                    })));
+                                        std::vector<Future<void>> futs;
 
-                    return when_all(futs.begin(), futs.end())
-                        .then(
-                            []()
-                            { fmt::print("Load done\n"); })
-                        .then(
-                            [&backend, ind]()
-                            {
-                                std::vector<Future<void>> futs;
+                                        for (int i = N / THREAD_NUM * ind; i < N / THREAD_NUM * (ind + 1); i++)
+                                            futs.emplace_back(std::move(
+                                                make_ready_future().then(
+                                                    [&backend, i, &latencies]()
+                                                    {
+                                                        return backend.get_cursor().then(
+                                                            [i, &latencies](StdMapBackend::Cursor cursor)
+                                                            {
+                                                                // fmt::print("Started\n");
+                                                                return cursor.get(i).then(
+                                                                    [i, &latencies, start_time = std::chrono::high_resolution_clock::now()](std::tuple<StdMapBackend::Cursor, std::string> args)
+                                                                    {
+                                                                        auto &&[cursor, s] = args;
+                                                                        // fmt::print("Returned\n");
+                                                                        auto end_time = std::chrono::high_resolution_clock::now();
+                                                                        auto duration = end_time - start_time;
+                                                                        latencies[i] =
+                                                                            std::chrono::duration_cast<std::chrono::nanoseconds>(duration)
+                                                                                .count();
+                                                                    });
+                                                            });
+                                                    })));
 
-                                for (int i = N / THREAD_NUM * ind; i < N / THREAD_NUM * (ind + 1); i++)
-                                    futs.emplace_back(std::move(
-                                        backend.get(i)
+                                        return when_all(futs.begin(), futs.end())
                                             .then(
-                                                [i](std::string s)
+                                                [ind]()
                                                 {
-                                                    //   fmt::print("{} {} {} get\n", std::to_string(i) == s, i, s);
-                                                })));
+                                                    fmt::print("#{} Get done\n", ind);
+                                                });
+                                    }));
 
-                                return when_all(futs.begin(), futs.end());
-                            });
-                });
+                        return when_all(futures.begin(), futures.end())
+                            .then(
+                                [&latencies]()
+                                {
+                                    fmt::print("All Get done\n");
+                                    fmt::print("Sorting latencies...\n");
+
+                                    double sum = 0;
+                                    std::sort(latencies.begin(), latencies.end());
+                                    for (auto l : latencies)
+                                        sum += l;
+
+                                    fmt::print(
+                                        "Avg:   {}\n"
+                                        "Mid:   {}\n"
+                                        "90:    {}\n"
+                                        "99:    {}\n"
+                                        "99.9:  {}\n"
+                                        "99.99: {}\n",
+                                        sum / latencies.size(),
+                                        latencies[N / 2],
+                                        latencies[int(N * 0.9)],
+                                        latencies[int(N * 0.99)],
+                                        latencies[int(N * 0.999)],
+                                        latencies[int(N * 0.9999)]);
+
+                                    // std::ofstream fout("latencies.csv");
+
+                                    // for (auto l : latencies)
+                                    //     fout << l << '\n';
+
+                                    // fout.close();
+                                });
+                        ;
+                    });
+        });
 
     for (int i = 0; i < THREAD_NUM; i++)
         Eventloop::get_loop(i).run();

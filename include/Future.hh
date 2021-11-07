@@ -39,6 +39,7 @@ class Future : public FutureBase
 
     std::any prev_future;
     void_function_helper_t<Value> then_body;
+    fu2::unique_function<void(void)> finally_body;
 
     Future(Promise<Value> *promise) : promise(promise), ready(false) {}
 
@@ -49,12 +50,19 @@ class Future : public FutureBase
         if (ready && then_body)
         {
             Eventloop::get_loop(Eventloop::get_cpu_index())
-                .call_soon([body = std::move(then_body), value = std::move(value), prev_fut = std::move(prev_future)]() mutable
-                           { 
-                                if constexpr (!std::is_void_v<Value>)
-                                    body(std::move(value)); 
-                                else
-                                    body(); });
+                .call_soon(
+                    [body = std::move(then_body),
+                     finally_body = std::move(finally_body),
+                     value = std::move(value),
+                     prev_fut = std::move(prev_future)]() mutable
+                    {
+                        if constexpr (!std::is_void_v<Value>)
+                            body(std::move(value));
+                        else
+                            body();
+                        if (!finally_body.empty())
+                            finally_body();
+                    });
         }
     }
 
@@ -82,6 +90,13 @@ public:
 
     template <typename Func>
     auto then(Func &&body);
+
+    auto finally(fu2::unique_function<void(void)> &&body)
+    {
+        finally_body = std::move(body);
+        Future ret = std::move(*this);
+        return ret;
+    }
 };
 
 template <typename Value>
@@ -243,6 +258,7 @@ auto Future<Value>::generate_future_chain(Func &&body)
 
     Promise<RealRetType> promise;
     Future<RealRetType> future = promise.get_future();
+    future.finally_body = std::move(finally_body);
     spfuture->then_body = std::move(
         [promise = std::move(promise),
          body = std::forward<Func>(body)](V... args) mutable
@@ -256,7 +272,7 @@ auto Future<Value>::generate_future_chain(Func &&body)
                         body(std::move(args)...)
                             .then(
                                 [shared_fut, promise = std::move(promise)](std::remove_pointer_t<decltype(vs)>... vs1) mutable
-                                { promise.resolve(vs1...); });
+                                { promise.resolve(std::forward<std::remove_pointer_t<decltype(vs)>>(vs1)...); });
                     *shared_fut = std::move(fut_tmp);
                 };
                 if constexpr (!std::is_void_v<RealRetType>)
@@ -327,6 +343,7 @@ inline Future<Value> &Future<Value>::operator=(Future<Value> &&fut)
         ready = fut.ready;
         new (&value) decltype(value){std::move(fut.value)};
         then_body = std::move(fut.then_body);
+        finally_body = std::move(fut.finally_body);
         prev_future = std::move(fut.prev_future);
 
         fut.ready = false;
