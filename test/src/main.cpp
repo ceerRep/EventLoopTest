@@ -253,15 +253,16 @@ int main(void)
 
                                     fmt::print(
                                         "Avg:   {}\n"
-                                        "Mid:   {}\n"
-                                        "90:    {}\n"
-                                        "99:    {}\n"
+                                        "Mid:   {}\n",
+                                        sum / latencies.size(),
+                                        latencies[N / 2]);
+
+                                    for (int i = 90; i <= 99; i++)
+                                        fmt::print("{}:    {}\n", i, latencies[int(N * 0.01 * i)]);
+
+                                    fmt::print(
                                         "99.9:  {}\n"
                                         "99.99: {}\n",
-                                        sum / latencies.size(),
-                                        latencies[N / 2],
-                                        latencies[int(N * 0.9)],
-                                        latencies[int(N * 0.99)],
                                         latencies[int(N * 0.999)],
                                         latencies[int(N * 0.9999)]);
 
