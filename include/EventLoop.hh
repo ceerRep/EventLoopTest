@@ -35,12 +35,17 @@ class Future;
 class Eventloop
 {
     inline static thread_local int cpu_ind = -1;
-    inline static std::vector<Eventloop *> loops;
-    inline static int32_t active_loop_num;
+    inline static std::vector<std::unique_ptr<Eventloop>> loops;
+
+    inline static volatile int32_t sleeping_loops;
+    inline static std::condition_variable sleep_cv;
+    inline static std::mutex sleep_mutex;
 
     std::thread th;
 
     int index;
+
+    volatile bool running;
 
     volatile int to_sleep;
     std::condition_variable cv;
@@ -62,7 +67,13 @@ class Eventloop
 
     void wake()
     {
-        std::lock_guard<std::mutex> lk(cv_m);
+        std::unique_lock lk(cv_m);
+
+        if (to_sleep)
+        {
+            std::unique_lock sl(sleep_mutex);
+            sleeping_loops -= 1;
+        }
         to_sleep = 0;
         cv.notify_all();
     }
@@ -109,11 +120,11 @@ public:
             throw std::logic_error(fmt::format("cpu_ind should be -1, get {}", cpu_ind));
         cpu_ind = index;
 
-        __atomic_add_fetch(&active_loop_num, 1, __ATOMIC_SEQ_CST);
-
         fmt::print("Event loop running on cpu #{}\n", cpu_ind);
 
-        while (true)
+        running = true;
+
+        while (running)
         {
             decltype(queue)::value_type func;
 
@@ -138,31 +149,30 @@ public:
                 }
                 else
                 {
-                    lock.unlock();
-
-                    if (__atomic_fetch_sub(&active_loop_num, 1, __ATOMIC_SEQ_CST) == 1)
                     {
-                        break;
+                        std::lock_guard guard{sleep_mutex};
+                        sleeping_loops += 1;
+                        sleep_cv.notify_all();
                     }
-                    else
+
                     {
                         using namespace std::chrono_literals;
 
                         std::unique_lock lk(cv_m, std::defer_lock);
                         lk.lock();
                         to_sleep = 1;
+
+                        lock.unlock();
                         cv.wait_for(lk, 1s, [this]
                                     { return to_sleep != 1; });
                         if (to_sleep)
                         {
                             std::cerr << fmt::format("Loop #{} sleeped\n", index);
-                            cv.wait_for(lk, 1s, [this]
-                                        { return to_sleep != 1; });
+                            cv.wait(lk, [this]
+                                    { return to_sleep != 1; });
                             std::cerr << fmt::format("Loop #{} waked: {}\n", index, to_sleep ? "timeout" : "notify");
                         }
                     }
-
-                    __atomic_add_fetch(&active_loop_num, 1, __ATOMIC_SEQ_CST);
                 }
             }
 
@@ -189,9 +199,31 @@ public:
         loops.resize(loop_num);
 
         for (int i = 0; i < loop_num; i++)
-            loops[i] = new Eventloop(i);
+            loops[i] = std::make_unique<Eventloop>(i);
 
-        active_loop_num = 0;
+        sleeping_loops = 0;
+
+        std::thread(
+            [loop_num]()
+            {
+                {
+                    std::unique_lock lk(sleep_mutex, std::defer_lock);
+                    lk.lock();
+
+                    sleep_cv.wait(lk,
+                                  [loop_num]
+                                  {
+                                      return sleeping_loops == loop_num;
+                                  });
+                }
+
+                for (int i = 0; i < loop_num; i++)
+                {
+                    loops[i]->running = false;
+                    loops[i]->wake();
+                }
+            })
+            .detach();
     }
 
     static inline Eventloop &get_loop(int index)

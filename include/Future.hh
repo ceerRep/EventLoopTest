@@ -127,7 +127,16 @@ public:
     Promise &operator=(Promise &&pro)
     {
         std::unique_lock lk_this(lock, std::defer_lock), lk_pro(pro.lock, std::defer_lock);
-        std::lock(lk_this, lk_pro);
+        if (this < &pro)
+        {
+            lk_this.lock();
+            lk_pro.lock();
+        }
+        else
+        {
+            lk_pro.lock();
+            lk_this.lock();
+        }
 
         // std::cerr << fmt::format("Promise {} moved from {}, future is {}\n", fmt::ptr(this), fmt::ptr(&pro), fmt::ptr(future));
         future = pro.future;
@@ -164,9 +173,14 @@ public:
             // Submit to correct loop
             Eventloop::get_loop(loopno).call_soon(
                 [pro = std::move(*this), args = std::tuple(std::move(args)...)]() mutable
-                { std::apply([&pro](auto &&...args) mutable
-                             { pro.resolve(std::move(args)...); },
-                             std::move(args)); });
+                {
+                    std::apply(
+                        [&pro](auto &&...args) mutable
+                        {
+                            pro.resolve(std::move(args)...);
+                        },
+                        std::move(args));
+                });
 
             return;
         }
@@ -277,7 +291,7 @@ auto Future<Value>::generate_future_chain(Func &&body)
 
 template <typename Value>
 template <typename Func>
-inline auto Future<Value>::then(Func &&body)
+[[nodiscard]] inline auto Future<Value>::then(Func &&body)
 {
     if constexpr (std::is_void_v<Value>)
         return std::move(generate_future_chain<Func>(std::forward<Func>(body)));
@@ -291,7 +305,16 @@ inline Future<Value> &Future<Value>::operator=(Future<Value> &&fut)
     while (true)
     {
         std::unique_lock lock_this(lock, std::defer_lock), lock_fut(fut.lock, std::defer_lock);
-        std::lock(lock_this, lock_fut);
+        if (this < &fut)
+        {
+            lock_this.lock();
+            lock_fut.lock();
+        }
+        else
+        {
+            lock_fut.lock();
+            lock_this.lock();
+        }
 
         if (fut.promise)
         {
@@ -320,7 +343,7 @@ inline Future<Value> &Future<Value>::operator=(Future<Value> &&fut)
 }
 
 template <typename Iterator>
-Future<void> when_all(Iterator begin, Iterator end)
+[[nodiscard]] Future<void> when_all(Iterator begin, Iterator end)
 {
     static_assert(std::is_same_v<std::remove_reference_t<decltype(*begin)>, Future<void>>, "Iterator should point to Future<void>");
 
@@ -409,7 +432,7 @@ void Eventloop::call_later(Func &&func_, Duration duration)
 }
 
 template <typename T, typename Value = std::remove_reference_t<T>>
-Future<Value> make_ready_future(T &&value)
+[[nodiscard]] Future<Value> make_ready_future(T &&value)
 {
     Promise<Value> promise;
     auto fut = promise.get_future();
@@ -418,7 +441,7 @@ Future<Value> make_ready_future(T &&value)
     return fut;
 }
 
-inline Future<void> make_ready_future()
+[[nodiscard]] inline Future<void> make_ready_future()
 {
     Promise<void> promise;
     auto fut = promise.get_future();
@@ -428,7 +451,7 @@ inline Future<void> make_ready_future()
 }
 
 template <typename Duration>
-inline Future<void> async_sleep(Duration duration)
+[[nodiscard]] inline Future<void> async_sleep(Duration duration)
 {
     auto promise = Promise<void>();
     auto future = promise.get_future();
@@ -439,6 +462,40 @@ inline Future<void> async_sleep(Duration duration)
                     duration);
 
     return std::move(future);
+}
+
+template <typename Func>
+[[nodiscard]] inline Future<void> submit_to(int n, Func &&func)
+{
+    Promise<void> p;
+    auto fut = p.get_future();
+
+    Eventloop::get_loop(n).call_soon(
+        [promise = std::move(p), func = std::forward<Func>(func)]() mutable
+        {
+            if constexpr (std::is_void_v<Func>)
+            {
+                func();
+                promise.resolve();
+            }
+            else if constexpr (std::is_base_of_v<FutureBase, std::invoke_result_t<Func>>)
+            {
+                auto result = func().then(
+                    [promise = std::move(promise)]() mutable
+                    {
+                        promise.resolve();
+                    });
+                return result;
+            }
+            else
+            {
+                static_assert(
+                    std::is_void_v<Func> || std::is_base_of_v<FutureBase, std::invoke_result_t<Func>>,
+                    "Func type should be either void or Future");
+            }
+        });
+
+    return fut;
 }
 
 #endif
