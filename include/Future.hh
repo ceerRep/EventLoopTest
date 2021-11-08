@@ -30,8 +30,6 @@ class Promise;
 template <typename Value>
 class Future : public FutureBase
 {
-    Spinlock lock;
-
     Promise<Value> *promise;
 
     bool ready;
@@ -45,8 +43,6 @@ class Future : public FutureBase
 
     void try_enqueue()
     {
-        std::lock_guard lk_this{lock};
-
         if (ready && then_body)
         {
             Eventloop::get_loop(Eventloop::get_cpu_index())
@@ -102,8 +98,6 @@ public:
 template <typename Value>
 class Promise
 {
-    Spinlock lock;
-
     int loopno;
     Future<Value> *future;
 
@@ -141,36 +135,18 @@ public:
 
     Promise &operator=(Promise &&pro)
     {
-        std::unique_lock lk_this(lock, std::defer_lock), lk_pro(pro.lock, std::defer_lock);
-        if (this < &pro)
-        {
-            lk_this.lock();
-            lk_pro.lock();
-        }
-        else
-        {
-            lk_pro.lock();
-            lk_this.lock();
-        }
-
         // std::cerr << fmt::format("Promise {} moved from {}, future is {}\n", fmt::ptr(this), fmt::ptr(&pro), fmt::ptr(future));
         future = pro.future;
         loopno = pro.loopno;
         pro.future = nullptr;
-        if (future)
-        {
-            std::unique_lock lk_fut{future->lock, std::defer_lock};
-            lk_fut.lock();
-            future->promise = this;
-        }
+
+        future->promise = this;
 
         return *this;
     }
 
     Future<Value> get_future()
     {
-        std::unique_lock lk_this(lock, std::defer_lock);
-        lk_this.lock();
         Future future(this);
         this->future = &future;
 
@@ -200,14 +176,8 @@ public:
             return;
         }
 
-        std::unique_lock lk_this(lock, std::defer_lock);
-        lk_this.lock();
-
         if (future)
         {
-            std::unique_lock lk_fut{future->lock, std::defer_lock};
-            lk_fut.lock();
-
             if constexpr (!std::is_void_v<Value>)
                 new (&(future->value)) decltype(future->value){std::forward<Args>(args)...};
 
@@ -221,29 +191,20 @@ public:
         else
             std::cerr << fmt::format("Warning: trying to resolve a promise without future\nStack trace: \n{}", get_stack_trace());
     }
+
+    int get_loop_index() const
+    {
+        return loopno;
+    }
 };
 
 template <typename Value>
 inline Future<Value>::~Future()
 {
     // std::cerr << fmt::format("Future {} destroyed, promise is {}\n", fmt::ptr(this), fmt::ptr(promise));
-    while (true)
+    if (promise)
     {
-        std::unique_lock lk_this{lock, std::defer_lock};
-        lk_this.lock();
-
-        if (promise)
-        {
-            if (promise->lock.try_lock())
-            {
-                promise->future = nullptr;
-                promise->lock.unlock();
-            }
-            else
-                continue;
-        }
-
-        break;
+        promise->future = nullptr;
     }
 }
 
@@ -318,45 +279,24 @@ template <typename Func>
 template <typename Value>
 inline Future<Value> &Future<Value>::operator=(Future<Value> &&fut)
 {
-    while (true)
+    // std::cerr << fmt::format("Future {} moved from {}, promise is {}\n", fmt::ptr(this), fmt::ptr(&fut), fmt::ptr(fut.promise));
+
+    promise = fut.promise;
+    ready = fut.ready;
+    new (&value) decltype(value){std::move(fut.value)};
+    then_body = std::move(fut.then_body);
+    finally_body = std::move(fut.finally_body);
+    prev_future = std::move(fut.prev_future);
+
+    fut.ready = false;
+    fut.promise = nullptr;
+
+    if (promise)
     {
-        std::unique_lock lock_this(lock, std::defer_lock), lock_fut(fut.lock, std::defer_lock);
-        if (this < &fut)
-        {
-            lock_this.lock();
-            lock_fut.lock();
-        }
-        else
-        {
-            lock_fut.lock();
-            lock_this.lock();
-        }
-
-        if (fut.promise)
-        {
-            if (!fut.promise->lock.try_lock())
-                continue;
-        }
-        // std::cerr << fmt::format("Future {} moved from {}, promise is {}\n", fmt::ptr(this), fmt::ptr(&fut), fmt::ptr(fut.promise));
-
-        promise = fut.promise;
-        ready = fut.ready;
-        new (&value) decltype(value){std::move(fut.value)};
-        then_body = std::move(fut.then_body);
-        finally_body = std::move(fut.finally_body);
-        prev_future = std::move(fut.prev_future);
-
-        fut.ready = false;
-        fut.promise = nullptr;
-
-        if (promise)
-        {
-            promise->future = this;
-            promise->lock.unlock();
-        }
-
-        return *this;
+        promise->future = this;
     }
+
+    return *this;
 }
 
 template <typename Iterator>
@@ -484,23 +424,31 @@ template <typename Duration>
 template <typename Func>
 [[nodiscard]] inline Future<void> submit_to(int n, Func &&func)
 {
-    Promise<void> p;
-    auto fut = p.get_future();
+    auto unique_promise = std::make_unique<Promise<void>>();
+    auto fut = unique_promise->get_future();
 
     Eventloop::get_loop(n).call_soon(
-        [promise = std::move(p), func = std::forward<Func>(func)]() mutable
+        [unique_promise = std::move(unique_promise), func = std::forward<Func>(func), loop = Eventloop::get_cpu_index()]() mutable
         {
             if constexpr (std::is_void_v<Func>)
             {
                 func();
-                promise.resolve();
+                Eventloop::get_loop(loop).call_soon(
+                    [unique_promise = std::move(unique_promise)]() mutable
+                    {
+                        unique_promise->resolve();
+                    });
             }
             else if constexpr (std::is_base_of_v<FutureBase, std::invoke_result_t<Func>>)
             {
                 auto result = func().then(
-                    [promise = std::move(promise)]() mutable
+                    [unique_promise = std::move(unique_promise), loop]() mutable
                     {
-                        promise.resolve();
+                        Eventloop::get_loop(loop).call_soon(
+                            [unique_promise = std::move(unique_promise)]() mutable
+                            {
+                                unique_promise->resolve();
+                            });
                     });
                 return result;
             }

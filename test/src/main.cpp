@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -69,20 +70,24 @@ public:
 
         Future<std::tuple<Cursor, std::string>> get(uint64_t key)
         {
-            int index = key % backend->bucket_num;
+            int index = (key * 19260817) % backend->bucket_num;
 
-            Promise<std::tuple<Cursor, std::string>> pro;
-            auto fut = pro.get_future();
+            auto unique_pro = std::make_unique<Promise<std::tuple<Cursor, std::string>>>();
+            auto fut = unique_pro->get_future();
 
             Eventloop::get_loop(index).call_soon(
-                [key, pro = std::move(pro), cursor = std::move(*this)]() mutable
+                [key, unique_pro = std::move(unique_pro), cursor = std::move(*this), loop = Eventloop::get_cpu_index()]() mutable
                 {
                     auto &bucket = getBucket();
 
                     return bucket.sem.wait().then(
-                        [key, pro = std::move(pro), &bucket, cursor = std::move(cursor)]() mutable
+                        [key, unique_pro = std::move(unique_pro), &bucket, cursor = std::move(cursor), loop]() mutable
                         {
-                            pro.resolve(std::move(std::tuple<Cursor, std::string>{std::move(cursor), bucket.storage[key]}));
+                            Eventloop::get_loop(loop).call_soon(
+                                [unique_pro = std::move(unique_pro), cursor = std::move(cursor), result = bucket.storage[key]]() mutable
+                                {
+                                    unique_pro->resolve(std::move(std::tuple<Cursor, std::string>{std::move(cursor), result}));
+                                });
                             bucket.sem.signal();
                         });
                 });
@@ -92,21 +97,25 @@ public:
 
         Future<Cursor> set(uint64_t key, const std::string &value)
         {
-            int index = key % backend->bucket_num;
+            int index = (key * 19260817) % backend->bucket_num;
 
-            Promise<Cursor> pro;
-            auto fut = pro.get_future();
+            auto unique_pro = std::make_unique<Promise<Cursor>>();
+            auto fut = unique_pro->get_future();
 
             Eventloop::get_loop(index).call_soon(
-                [key, value, pro = std::move(pro), cursor = std::move(*this)]() mutable
+                [key, value, unique_pro = std::move(unique_pro), cursor = std::move(*this), loop = Eventloop::get_cpu_index()]() mutable
                 {
                     auto &bucket = getBucket();
 
                     return bucket.sem.wait().then(
-                        [key, value, pro = std::move(pro), &bucket, cursor = std::move(cursor)]() mutable
+                        [key, value, unique_pro = std::move(unique_pro), &bucket, cursor = std::move(cursor), loop]() mutable
                         {
                             bucket.storage[key] = value;
-                            pro.resolve(std::move(cursor));
+                            Eventloop::get_loop(loop).call_soon(
+                                [unique_pro = std::move(unique_pro), cursor = std::move(cursor)]() mutable
+                                {
+                                    unique_pro->resolve(std::move(cursor));
+                                });
                             bucket.sem.signal();
                         });
                 });
@@ -116,21 +125,25 @@ public:
 
         Future<Cursor> remove(uint64_t key)
         {
-            int index = key % backend->bucket_num;
+            int index = (key * 19260817) % backend->bucket_num;
 
-            Promise<Cursor> pro;
-            auto fut = pro.get_future();
+            auto unique_pro = std::make_unique<Promise<Cursor>>();
+            auto fut = unique_pro->get_future();
 
             Eventloop::get_loop(index).call_soon(
-                [key, pro = std::move(pro), cursor = std::move(*this)]() mutable
+                [key, unique_pro = std::move(unique_pro), cursor = std::move(*this), loop = Eventloop::get_cpu_index()]() mutable
                 {
                     auto &bucket = getBucket();
 
                     return bucket.sem.wait().then(
-                        [key, pro = std::move(pro), &bucket, cursor = std::move(cursor)]() mutable
+                        [key, unique_pro = std::move(unique_pro), &bucket, cursor = std::move(cursor), loop]() mutable
                         {
                             bucket.storage.erase(key);
-                            pro.resolve(std::move(cursor));
+                            Eventloop::get_loop(loop).call_soon(
+                                [unique_pro = std::move(unique_pro), cursor = std::move(cursor)]() mutable
+                                {
+                                    unique_pro->resolve(std::move(cursor));
+                                });
                             bucket.sem.signal();
                         });
                 });

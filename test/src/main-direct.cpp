@@ -16,25 +16,50 @@
 #include <Semaphore.hh>
 #include <vector>
 
-class ConcurrentSemaphore : Semaphore
+class ConcurrentSemaphore
 {
     Spinlock lk;
+    int num;
+
+    std::list<std::unique_ptr<Promise<void>>> pending_list;
 
 public:
-    ConcurrentSemaphore(int num) : Semaphore(num) {}
+    ConcurrentSemaphore(int num) : num(num) {}
     ConcurrentSemaphore(const ConcurrentSemaphore &) = delete;
     ConcurrentSemaphore(ConcurrentSemaphore &&) = default;
 
     Future<void> wait()
     {
         std::lock_guard guard{lk};
-        return Semaphore::wait();
+        num--;
+
+        if (num >= 0)
+            return make_ready_future();
+        else
+        {
+            pending_list.emplace_back(new Promise<void>);
+            return pending_list.back()->get_future();
+        }
     }
 
     void signal()
     {
         std::lock_guard guard{lk};
-        Semaphore::signal();
+        num++;
+
+        if (num <= 0)
+        {
+            auto ppro = std::move(pending_list.front());
+            pending_list.pop_front();
+
+            auto loopno = ppro->get_loop_index();
+
+            Eventloop::get_loop(loopno).call_soon(
+                [ppro = std::move(ppro)]()
+                {
+                    ppro->resolve();
+                });
+        }
     }
 };
 
@@ -99,7 +124,7 @@ public:
 
         Future<std::tuple<Cursor, std::string>> get(uint64_t key)
         {
-            int index = key % backend->bucket_num;
+            int index = (key * 19260817) % backend->bucket_num;
 
             auto &bucket = getBucketAt(index);
 
@@ -114,7 +139,7 @@ public:
 
         Future<Cursor> set(uint64_t key, const std::string &value)
         {
-            int index = key % backend->bucket_num;
+            int index = (key * 19260817) % backend->bucket_num;
 
             auto &bucket = getBucketAt(index);
 
@@ -129,7 +154,7 @@ public:
 
         Future<Cursor> remove(uint64_t key)
         {
-            int index = key % backend->bucket_num;
+            int index = (key * 19260817) % backend->bucket_num;
 
             auto &bucket = getBucketAt(index);
 
