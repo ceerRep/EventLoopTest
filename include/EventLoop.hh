@@ -126,6 +126,7 @@ public:
 
         while (running)
         {
+            // TODO: pending_timepoints sleep
             decltype(queue)::value_type func;
 
             {
@@ -149,18 +150,25 @@ public:
                 }
                 else
                 {
+                    using namespace std::chrono_literals;
                     {
                         std::lock_guard guard{sleep_mutex};
+                        std::lock_guard guard_cv{cv_m};
                         sleeping_loops += 1;
-                        sleep_cv.notify_all();
+                        to_sleep = 1;
                     }
 
-                    {
-                        using namespace std::chrono_literals;
+                    auto start_time = std::chrono::high_resolution_clock::now();
+                    lock.unlock();
+                    while (to_sleep && std::chrono::high_resolution_clock::now() - start_time <= 50ms)
+                        ;
+                    lock.lock();
 
+                    if (to_sleep)
+                    {
+                        sleep_cv.notify_all();
                         std::unique_lock lk(cv_m, std::defer_lock);
                         lk.lock();
-                        to_sleep = 1;
 
                         lock.unlock();
                         cv.wait_for(lk, 1s, [this]
