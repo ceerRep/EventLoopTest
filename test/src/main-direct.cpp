@@ -209,6 +209,7 @@ Future<void> do_set(StdMapBackend &backend, uint64_t now_key, uint64_t end_key, 
 
 Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
 {
+    auto start = rdtscp();
     return backend.get_cursor()
         .then(
             [=, &backend](StdMapBackend::Cursor cursor) mutable
@@ -216,20 +217,21 @@ Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uin
                 return cursor.get(now_key);
             })
         .then(
-            [=, &backend, &latencies, start = std::chrono::high_resolution_clock::now()](auto) -> Future<void>
+            [=, &backend, &latencies](auto pack) -> Future<void>
             {
-                auto end = std::chrono::high_resolution_clock::now();
-                auto duration = end - start;
-                latencies[now_key] =
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(duration)
-                        .count();
+                auto end = rdtscp();
+                latencies[now_key] = end - start;
+
+                auto &&[cursor, value] = pack;
+
+                assert(std::to_string(now_key) == value);
 
                 auto next_key = now_key + step;
 
                 if (next_key >= end_key)
                     return make_ready_future();
                 else
-                    return do_set(backend, next_key, end_key, step);
+                    return do_get(latencies, backend, next_key, end_key, step);
             });
 }
 
