@@ -166,15 +166,60 @@ public:
     }
 };
 
-#define THREAD_NUM 8
-#define N 10000000
+#include <config.hpp>
+
+Future<void> do_set(StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
+{
+    return backend.get_cursor()
+        .then(
+            [=, &backend](StdMapBackend::Cursor cursor) mutable
+            {
+                return cursor.set(now_key, std::to_string(now_key));
+            })
+        .then(
+            [=, &backend](auto) -> Future<void>
+            {
+                auto next_key = now_key + step;
+
+                if (next_key >= end_key)
+                    return make_ready_future();
+                else
+                    return do_set(backend, next_key, end_key, step);
+            });
+}
+
+Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
+{
+    return backend.get_cursor()
+        .then(
+            [=, &backend](StdMapBackend::Cursor cursor) mutable
+            {
+                return cursor.get(now_key);
+            })
+        .then(
+            [=, &backend, &latencies, start = std::chrono::high_resolution_clock::now()](auto) -> Future<void>
+            {
+                auto end = std::chrono::high_resolution_clock::now();
+                auto duration = end - start;
+                latencies[now_key] =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(duration)
+                        .count();
+
+                auto next_key = now_key + step;
+
+                if (next_key >= end_key)
+                    return make_ready_future();
+                else
+                    return do_set(backend, next_key, end_key, step);
+            });
+}
 
 int main(void)
 {
     std::vector<int64_t> latencies(N);
 
     Eventloop::initialize_event_loops(THREAD_NUM);
-    StdMapBackend backend(THREAD_NUM);
+    StdMapBackend backend(BUCKET_NUM);
 
     Eventloop::get_loop(0).call_soon(
         [&]()
@@ -187,17 +232,17 @@ int main(void)
                         ind,
                         [&backend, ind]()
                         {
-                            std::vector<Future<void>> futs;
+                            std::vector<Future<void>> futures;
 
-                            for (int i = N / THREAD_NUM * ind; i < N / THREAD_NUM * (ind + 1); i++)
-                                futs.emplace_back(std::move(
-                                    backend.get_cursor().then(
-                                        [i](StdMapBackend::Cursor cursor) mutable
-                                        {
-                                            return cursor.set(i, std::to_string(i)).then([](auto) {});
-                                        })));
+                            for (int i = 0; i < WORKER_PER_CORE; i++)
+                                futures.emplace_back(std::move(
+                                    do_set(
+                                        backend,
+                                        N / THREAD_NUM * ind + i,
+                                        N / THREAD_NUM * (ind + 1),
+                                        WORKER_PER_CORE)));
 
-                            return when_all(futs.begin(), futs.end())
+                            return when_all(futures.begin(), futures.end())
                                 .then(
                                     [ind]()
                                     { fmt::print("#{} Load done\n", ind); });
@@ -219,37 +264,21 @@ int main(void)
                                     ind,
                                     [&backend, ind, &latencies]()
                                     {
-                                        std::vector<Future<void>> futs;
+                                        std::vector<Future<void>> futures;
 
-                                        for (int i = N / THREAD_NUM * ind; i < N / THREAD_NUM * (ind + 1); i++)
-                                            futs.emplace_back(std::move(
-                                                make_ready_future().then(
-                                                    [&backend, i, &latencies]()
-                                                    {
-                                                        return backend.get_cursor().then(
-                                                            [i, &latencies](StdMapBackend::Cursor cursor)
-                                                            {
-                                                                // fmt::print("Started\n");
-                                                                return cursor.get(i).then(
-                                                                    [i, &latencies, start_time = std::chrono::high_resolution_clock::now()](std::tuple<StdMapBackend::Cursor, std::string> args)
-                                                                    {
-                                                                        auto &&[cursor, s] = args;
-                                                                        // fmt::print("Returned\n");
-                                                                        auto end_time = std::chrono::high_resolution_clock::now();
-                                                                        auto duration = end_time - start_time;
-                                                                        latencies[i] =
-                                                                            std::chrono::duration_cast<std::chrono::nanoseconds>(duration)
-                                                                                .count();
-                                                                    });
-                                                            });
-                                                    })));
+                                        for (int i = 0; i < WORKER_PER_CORE; i++)
+                                            futures.emplace_back(std::move(
+                                                do_get(
+                                                    latencies,
+                                                    backend,
+                                                    N / THREAD_NUM * ind + i,
+                                                    N / THREAD_NUM * (ind + 1),
+                                                    WORKER_PER_CORE)));
 
-                                        return when_all(futs.begin(), futs.end())
+                                        return when_all(futures.begin(), futures.end())
                                             .then(
                                                 [ind]()
-                                                {
-                                                    fmt::print("#{} Get done\n", ind);
-                                                });
+                                                { fmt::print("#{} Get done\n", ind); });
                                     }));
 
                         return when_all(futures.begin(), futures.end())

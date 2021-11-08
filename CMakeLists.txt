@@ -47,3 +47,11 @@ add_executable (direct-model-test
     ${EVENTLOOP_SOURCE}
     test/src/main-direct.cpp
 )
+
+target_include_directories (async-model-test
+    PUBLIC "${CMAKE_SOURCE_DIR}/test/include"
+)
+
+target_include_directories (direct-model-test 
+    PUBLIC "${CMAKE_SOURCE_DIR}/test/include"
+)
