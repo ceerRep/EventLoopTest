@@ -22,6 +22,7 @@ link_libraries(fmt::fmt)
 add_subdirectory(function2)
 link_libraries(function2)
 
+set(MI_BUILD_TESTS OFF)
 add_subdirectory(mimalloc)
 link_libraries(mimalloc)
 
