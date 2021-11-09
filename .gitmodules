@@ -4,3 +4,6 @@
 [submodule "mimalloc"]
 	path = mimalloc
 	url = https://github.com/microsoft/mimalloc.git
+[submodule "concurrentqueue"]
+	path = concurrentqueue
+	url = https://github.com/cameron314/concurrentqueue.git

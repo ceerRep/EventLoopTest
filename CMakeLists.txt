@@ -27,6 +27,7 @@ add_subdirectory(mimalloc)
 link_libraries(mimalloc)
 
 include_directories("${CMAKE_SOURCE_DIR}/include")
+include_directories("${CMAKE_SOURCE_DIR}/concurrentqueue")
 
 set (EVENTLOOP_SOURCE
     src/cpu.cpp
