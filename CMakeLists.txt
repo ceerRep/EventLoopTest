@@ -16,6 +16,8 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 link_libraries(Threads::Threads)
 
+find_package(Boost REQUIRED fiber)
+
 find_package(fmt)
 link_libraries(fmt::fmt)
 
@@ -50,10 +52,22 @@ add_executable (direct-model-test
     test/src/main-direct.cpp
 )
 
+add_executable (boost-fiber-test
+    test/src/boost-fiber-test.cpp
+    src/mimalloc-override.cc
+)
+
+target_include_directories(boost-fiber-test PUBLIC ${Boost_INCLUDE_DIR} )
+target_link_libraries(boost-fiber-test ${Boost_LIBRARIES})
+
 target_include_directories (async-model-test
     PUBLIC "${CMAKE_SOURCE_DIR}/test/include"
 )
 
 target_include_directories (direct-model-test 
+    PUBLIC "${CMAKE_SOURCE_DIR}/test/include"
+)
+
+target_include_directories (boost-fiber-test
     PUBLIC "${CMAKE_SOURCE_DIR}/test/include"
 )
