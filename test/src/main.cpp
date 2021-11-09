@@ -7,8 +7,11 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <variant>
 
 #include <fmt/format.h>
+
+#include <concurrentqueue.h>
 
 #include <EventLoop.hh>
 #include <Future.hh>
@@ -24,145 +27,155 @@ struct
 
 class StdMapBackend
 {
+    struct request
+    {
+        enum
+        {
+            GET,
+            SET,
+            DELETE
+        };
+        int type;
+        uint64_t key;
+        std::string value;
+        std::unique_ptr<Promise<void>> p_promise_void;
+        std::unique_ptr<Promise<std::string>> p_promise_string;
+    };
+
     struct bucket
     {
         std::map<uint64_t, std::string> storage;
-        Semaphore sem{1};
+        moodycamel::ConcurrentQueue<request> queue;
     };
 
     int bucket_num;
 
+    inline static bool running;
+    inline static std::vector<bucket> buckets;
+    inline static std::vector<std::thread> threads;
+
+    inline static bucket &getBucketAt(int ind)
+    {
+        return buckets[ind];
+    }
+
     inline static bucket &getBucket()
     {
-        thread_local static bucket b;
-        return b;
+        return buckets[Eventloop::get_cpu_index()];
+    }
+
+    void worker(bucket &bucket, bool &running)
+    {
+        request req;
+        while (running)
+        {
+            if (bucket.queue.try_dequeue(req))
+            {
+                switch (req.type)
+                {
+                case request::GET:
+                {
+                    auto &loop = Eventloop::get_loop(req.p_promise_string->get_loop_index());
+                    loop.call_soon(
+                        [p_promise = std::move(req.p_promise_string), value = bucket.storage[req.key]]() mutable
+                        {
+                            p_promise->resolve(std::move(value));
+                        });
+                    break;
+                }
+                case request::SET:
+                {
+                    auto &loop = Eventloop::get_loop(req.p_promise_void->get_loop_index());
+                    bucket.storage[req.key] = req.value;
+                    loop.call_soon(
+                        [p_promise = std::move(req.p_promise_void)]() mutable
+                        {
+                            p_promise->resolve();
+                        });
+                    break;
+                }
+                case request::DELETE:
+                {
+                    auto &loop = Eventloop::get_loop(req.p_promise_void->get_loop_index());
+                    bucket.storage.erase(req.key);
+                    loop.call_soon(
+                        [p_promise = std::move(req.p_promise_void)]() mutable
+                        {
+                            p_promise->resolve();
+                        });
+                    break;
+                }
+                }
+            }
+        }
     }
 
 public:
-    class Cursor
+    StdMapBackend(int bucket_num) : bucket_num(bucket_num)
     {
-    private:
-        Semaphore *sem;
-        StdMapBackend *backend;
+        buckets.resize(bucket_num);
+        start_worker_thread();
+    }
 
-        Cursor(StdMapBackend *backend, Semaphore *sem) : backend(backend), sem(sem) {}
-        friend class StdMapBackend;
-
-    public:
-        Cursor() : backend(nullptr) {}
-        Cursor(const Cursor &) = delete;
-        Cursor(Cursor &&r)
-        {
-            backend = r.backend;
-            sem = r.sem;
-            r.backend = nullptr;
-            r.sem = nullptr;
-        }
-
-        ~Cursor()
-        {
-            if (backend)
-            {
-                sem->signal();
-                // fmt::print("Signaled\n");
-            }
-        }
-
-        Future<std::tuple<Cursor, std::string>> get(uint64_t key)
-        {
-            int index = (key * 19260817) % backend->bucket_num;
-
-            auto unique_pro = std::make_unique<Promise<std::tuple<Cursor, std::string>>>();
-            auto fut = unique_pro->get_future();
-
-            Eventloop::get_loop(index).call_soon(
-                [key, unique_pro = std::move(unique_pro), cursor = std::move(*this), loop = Eventloop::get_cpu_index()]() mutable
-                {
-                    auto &bucket = getBucket();
-
-                    return bucket.sem.wait().then(
-                        [key, unique_pro = std::move(unique_pro), &bucket, cursor = std::move(cursor), loop]() mutable
-                        {
-                            Eventloop::get_loop(loop).call_soon(
-                                [unique_pro = std::move(unique_pro), cursor = std::move(cursor), result = bucket.storage[key]]() mutable
-                                {
-                                    unique_pro->resolve(std::move(std::tuple<Cursor, std::string>{std::move(cursor), result}));
-                                });
-                            bucket.sem.signal();
-                        });
-                });
-
-            return fut;
-        }
-
-        Future<Cursor> set(uint64_t key, const std::string &value)
-        {
-            int index = (key * 19260817) % backend->bucket_num;
-
-            auto unique_pro = std::make_unique<Promise<Cursor>>();
-            auto fut = unique_pro->get_future();
-
-            Eventloop::get_loop(index).call_soon(
-                [key, value, unique_pro = std::move(unique_pro), cursor = std::move(*this), loop = Eventloop::get_cpu_index()]() mutable
-                {
-                    auto &bucket = getBucket();
-
-                    return bucket.sem.wait().then(
-                        [key, value, unique_pro = std::move(unique_pro), &bucket, cursor = std::move(cursor), loop]() mutable
-                        {
-                            bucket.storage[key] = value;
-                            Eventloop::get_loop(loop).call_soon(
-                                [unique_pro = std::move(unique_pro), cursor = std::move(cursor)]() mutable
-                                {
-                                    unique_pro->resolve(std::move(cursor));
-                                });
-                            bucket.sem.signal();
-                        });
-                });
-
-            return fut;
-        }
-
-        Future<Cursor> remove(uint64_t key)
-        {
-            int index = (key * 19260817) % backend->bucket_num;
-
-            auto unique_pro = std::make_unique<Promise<Cursor>>();
-            auto fut = unique_pro->get_future();
-
-            Eventloop::get_loop(index).call_soon(
-                [key, unique_pro = std::move(unique_pro), cursor = std::move(*this), loop = Eventloop::get_cpu_index()]() mutable
-                {
-                    auto &bucket = getBucket();
-
-                    return bucket.sem.wait().then(
-                        [key, unique_pro = std::move(unique_pro), &bucket, cursor = std::move(cursor), loop]() mutable
-                        {
-                            bucket.storage.erase(key);
-                            Eventloop::get_loop(loop).call_soon(
-                                [unique_pro = std::move(unique_pro), cursor = std::move(cursor)]() mutable
-                                {
-                                    unique_pro->resolve(std::move(cursor));
-                                });
-                            bucket.sem.signal();
-                        });
-                });
-
-            return fut;
-        }
-    };
-
-    StdMapBackend(int bucket_num) : bucket_num(bucket_num) {}
-
-    Future<Cursor> get_cursor()
+    ~StdMapBackend()
     {
-        static thread_local Semaphore pending{16};
-        return pending.wait()
-            .then(
-                [this]()
-                {
-                    return Cursor(this, &pending);
-                });
+        running = false;
+
+        for (auto &thread : threads)
+        {
+            if (thread.joinable())
+                thread.join();
+        }
+    }
+
+    Future<std::string> get(uint64_t key)
+    {
+        int index = (key * 19260817) % bucket_num;
+
+        auto unique_pro = std::make_unique<Promise<std::string>>();
+        auto fut = unique_pro->get_future();
+
+        request req{request::GET, key, "", nullptr, std::move(unique_pro)};
+        getBucketAt(index).queue.enqueue(std::move(req));
+
+        return fut;
+    }
+
+    Future<void> set(uint64_t key, const std::string &value)
+    {
+        int index = (key * 19260817) % bucket_num;
+
+        auto unique_pro = std::make_unique<Promise<void>>();
+        auto fut = unique_pro->get_future();
+
+        request req{request::SET, key, value, std::move(unique_pro), nullptr};
+        getBucketAt(index).queue.enqueue(std::move(req));
+
+        return fut;
+    }
+
+    Future<void> remove(uint64_t key)
+    {
+        int index = (key * 19260817) % bucket_num;
+
+        auto unique_pro = std::make_unique<Promise<void>>();
+        auto fut = unique_pro->get_future();
+
+        request req{request::SET, key, nullptr, std::move(unique_pro), nullptr};
+        getBucketAt(index).queue.enqueue(std::move(req));
+
+        return fut;
+    }
+
+    void start_worker_thread()
+    {
+        running = true;
+        for (auto &bucket : buckets)
+        {
+            threads.emplace_back(
+                [this, &bucket]()
+                { worker(bucket, running); });
+        }
     }
 };
 
@@ -170,14 +183,9 @@ public:
 
 Future<void> do_set(StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
 {
-    return backend.get_cursor()
+    return backend.set(now_key, std::to_string(now_key))
         .then(
-            [=, &backend](StdMapBackend::Cursor cursor) mutable
-            {
-                return cursor.set(now_key, std::to_string(now_key));
-            })
-        .then(
-            [=, &backend](auto) -> Future<void>
+            [=, &backend]() -> Future<void>
             {
                 auto next_key = now_key + step;
 
@@ -192,20 +200,12 @@ Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uin
 {
     auto start = rdtscp();
     // fmt::print("{} start\n", now_key);
-    return backend.get_cursor()
+    return backend.get(now_key)
         .then(
-            [=, &backend](StdMapBackend::Cursor cursor) mutable
-            {
-                //     fmt::print("{} ready\n", now_key);
-                return cursor.get(now_key);
-            })
-        .then(
-            [=, &backend, &latencies](auto pack) -> Future<void>
+            [=, &backend, &latencies](auto value) -> Future<void>
             {
                 auto end = rdtscp();
                 latencies[now_key] = end - start;
-
-                auto &&[cursor, value] = pack;
 
                 assert(std::to_string(now_key) == value);
 
@@ -321,6 +321,11 @@ int main(void)
                                     // fout.close();
                                 });
                         ;
+                    })
+                .finally(
+                    []()
+                    {
+                        Eventloop::stop_loops();
                     });
         });
 

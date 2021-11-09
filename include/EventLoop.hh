@@ -18,6 +18,8 @@
 #include <type_traits>
 #include <vector>
 
+#include <concurrentqueue.h>
+
 #include <fmt/core.h>
 #include <fmt/format.h>
 
@@ -51,7 +53,6 @@ class Eventloop
     std::condition_variable cv;
     std::mutex cv_m;
 
-    Spinlock queue_lock;
     Spinlock pending_future_lock;
 
     std::set<std::shared_ptr<Future<void>>> pending_futures;
@@ -60,7 +61,8 @@ class Eventloop
         std::chrono::time_point<std::chrono::high_resolution_clock>,
         fu2::unique_function<void(void)>>
         pending_timepoints;
-    std::queue<fu2::unique_function<void(void)>> queue;
+    moodycamel::ConcurrentQueue<fu2::unique_function<void(void)>> queue;
+    // std::queue<fu2::unique_function<void(void)>> queue;
 
     template <typename Func, typename... Args>
     friend auto future_function_transform(Func &&func);
@@ -127,15 +129,11 @@ public:
         while (running)
         {
             // TODO: pending_timepoints sleep
-            decltype(queue)::value_type func;
+            fu2::unique_function<void(void)> func;
 
             {
-                std::unique_lock lock{queue_lock, std::defer_lock};
-                lock.lock();
-                if (queue.size())
+                if (queue.try_dequeue(func))
                 {
-                    func = std::move(queue.front());
-                    queue.pop();
                 }
                 else if (pending_timepoints.size())
                 {
@@ -144,44 +142,44 @@ public:
                     while (pending_timepoints.size() && pending_timepoints.begin()->first <= now)
                     {
                         auto it = pending_timepoints.begin();
-                        queue.push(std::move(it->second));
+                        queue.enqueue(std::move(it->second));
                         pending_timepoints.erase(it);
                     }
                 }
-                else
-                {
-                    using namespace std::chrono_literals;
-                    {
-                        std::lock_guard guard{sleep_mutex};
-                        std::lock_guard guard_cv{cv_m};
-                        sleeping_loops += 1;
-                        to_sleep = 1;
-                    }
+                // else
+                // {
+                //     using namespace std::chrono_literals;
+                //     {
+                //         std::lock_guard guard{sleep_mutex};
+                //         std::lock_guard guard_cv{cv_m};
+                //         sleeping_loops += 1;
+                //         to_sleep = 1;
+                //     }
 
-                    auto start_time = std::chrono::high_resolution_clock::now();
-                    lock.unlock();
-                    while (to_sleep && std::chrono::high_resolution_clock::now() - start_time <= 50ms)
-                        ;
-                    lock.lock();
+                //     auto start_time = std::chrono::high_resolution_clock::now();
+                //     lock.unlock();
+                //     while (to_sleep && std::chrono::high_resolution_clock::now() - start_time <= 50ms)
+                //         ;
+                //     lock.lock();
 
-                    if (to_sleep)
-                    {
-                        sleep_cv.notify_all();
-                        std::unique_lock lk(cv_m, std::defer_lock);
-                        lk.lock();
+                //     if (to_sleep)
+                //     {
+                //         sleep_cv.notify_all();
+                //         std::unique_lock lk(cv_m, std::defer_lock);
+                //         lk.lock();
 
-                        lock.unlock();
-                        cv.wait_for(lk, 1s, [this]
-                                    { return to_sleep != 1; });
-                        if (to_sleep)
-                        {
-                            std::cerr << fmt::format("Loop #{} sleeped\n", index);
-                            cv.wait(lk, [this]
-                                    { return to_sleep != 1; });
-                            std::cerr << fmt::format("Loop #{} waked: {}\n", index, to_sleep ? "timeout" : "notify");
-                        }
-                    }
-                }
+                //         lock.unlock();
+                //         cv.wait_for(lk, 1s, [this]
+                //                     { return to_sleep != 1; });
+                //         if (to_sleep)
+                //         {
+                //             std::cerr << fmt::format("Loop #{} sleeped\n", index);
+                //             cv.wait(lk, [this]
+                //                     { return to_sleep != 1; });
+                //             std::cerr << fmt::format("Loop #{} waked: {}\n", index, to_sleep ? "timeout" : "notify");
+                //         }
+                //     }
+                // }
             }
 
             if (func)
@@ -234,6 +232,14 @@ public:
             .detach();
     }
 
+    static inline void stop_loops()
+    {
+        std::unique_lock lk(sleep_mutex, std::defer_lock);
+        lk.lock();
+        sleeping_loops = loops.size();
+        sleep_cv.notify_all();
+    }
+
     static inline Eventloop &get_loop(int index)
     {
         return *loops[index < 0 ? 0 : index];
@@ -243,8 +249,7 @@ public:
 template <typename F, std::enable_if_t<std::is_void_v<std::invoke_result_t<F>>, bool>>
 void Eventloop::call_soon(F &&func)
 {
-    std::lock_guard guard{queue_lock};
-    queue.emplace(std::forward<F>(func));
+    queue.enqueue(std::forward<F>(func));
 
     wake();
 }
@@ -255,11 +260,17 @@ template <typename F, typename Duration,
               bool>>
 void Eventloop::call_later(F &&func, Duration duration)
 {
-    std::lock_guard guard{queue_lock};
-    auto target_time = std::chrono::high_resolution_clock::now() + duration;
-    pending_timepoints.emplace(target_time, std::forward<F>(func));
-
-    wake();
+    if (get_cpu_index() != index)
+        call_soon(
+            [this, func = std::forward<F>(func), duration]() mutable
+            {
+                call_later(std::move(func), duration);
+            });
+    else
+    {
+        auto target_time = std::chrono::high_resolution_clock::now() + duration;
+        pending_timepoints.emplace(target_time, std::forward<F>(func));
+    }
 }
 
 #endif

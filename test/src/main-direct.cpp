@@ -80,6 +80,7 @@ class StdMapBackend
     };
 
     int bucket_num;
+
     inline static std::vector<bucket> buckets;
 
     inline static bucket &getBucketAt(int ind)
@@ -93,95 +94,52 @@ class StdMapBackend
     }
 
 public:
-    class Cursor
-    {
-    private:
-        Semaphore *sem;
-        StdMapBackend *backend;
-
-        Cursor(StdMapBackend *backend, Semaphore *sem) : backend(backend), sem(sem) {}
-        friend class StdMapBackend;
-
-    public:
-        Cursor() : backend(nullptr) {}
-        Cursor(const Cursor &) = delete;
-        Cursor(Cursor &&r)
-        {
-            backend = r.backend;
-            sem = r.sem;
-            r.backend = nullptr;
-            r.sem = nullptr;
-        }
-
-        ~Cursor()
-        {
-            if (backend)
-            {
-                sem->signal();
-                // fmt::print("Signaled\n");
-            }
-        }
-
-        Future<std::tuple<Cursor, std::string>> get(uint64_t key)
-        {
-            int index = (key * 19260817) % backend->bucket_num;
-
-            auto &bucket = getBucketAt(index);
-
-            return bucket.sem.wait().then(
-                [key, &bucket, cursor = std::move(*this)]() mutable
-                {
-                    std::string value = bucket.storage[key];
-                    bucket.sem.signal();
-                    return std::tuple<Cursor, std::string>{std::move(cursor), value};
-                });
-        }
-
-        Future<Cursor> set(uint64_t key, const std::string &value)
-        {
-            int index = (key * 19260817) % backend->bucket_num;
-
-            auto &bucket = getBucketAt(index);
-
-            return bucket.sem.wait().then(
-                [key, value, &bucket, cursor = std::move(*this)]() mutable
-                {
-                    bucket.storage[key] = value;
-                    bucket.sem.signal();
-                    return std::move(cursor);
-                });
-        }
-
-        Future<Cursor> remove(uint64_t key)
-        {
-            int index = (key * 19260817) % backend->bucket_num;
-
-            auto &bucket = getBucketAt(index);
-
-            return bucket.sem.wait().then(
-                [key, &bucket, cursor = std::move(*this)]() mutable
-                {
-                    bucket.storage.erase(key);
-                    bucket.sem.signal();
-                    return std::move(cursor);
-                });
-        }
-    };
-
     StdMapBackend(int bucket_num) : bucket_num(bucket_num)
     {
         buckets.resize(bucket_num);
     }
 
-    Future<Cursor> get_cursor()
+    Future<std::string> get(uint64_t key)
     {
-        static thread_local Semaphore pending{16};
-        return pending.wait()
-            .then(
-                [this]()
-                {
-                    return Cursor(this, &pending);
-                });
+        int index = (key * 19260817) % bucket_num;
+
+        auto &bucket = getBucketAt(index);
+
+        return bucket.sem.wait().then(
+            [key, &bucket]() mutable
+            {
+                std::string value = bucket.storage[key];
+                bucket.sem.signal();
+                return value;
+            });
+    }
+
+    Future<void> set(uint64_t key, const std::string &value)
+    {
+        int index = (key * 19260817) % bucket_num;
+
+        auto &bucket = getBucketAt(index);
+
+        return bucket.sem.wait().then(
+            [key, value, &bucket]() mutable
+            {
+                bucket.storage[key] = value;
+                bucket.sem.signal();
+            });
+    }
+
+    Future<void> remove(uint64_t key)
+    {
+        int index = (key * 19260817) % bucket_num;
+
+        auto &bucket = getBucketAt(index);
+
+        return bucket.sem.wait().then(
+            [key, &bucket]() mutable
+            {
+                bucket.storage.erase(key);
+                bucket.sem.signal();
+            });
     }
 };
 
@@ -189,14 +147,9 @@ public:
 
 Future<void> do_set(StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
 {
-    return backend.get_cursor()
+    return backend.set(now_key, std::to_string(now_key))
         .then(
-            [=, &backend](StdMapBackend::Cursor cursor) mutable
-            {
-                return cursor.set(now_key, std::to_string(now_key));
-            })
-        .then(
-            [=, &backend](auto) -> Future<void>
+            [=, &backend]() -> Future<void>
             {
                 auto next_key = now_key + step;
 
@@ -210,19 +163,12 @@ Future<void> do_set(StdMapBackend &backend, uint64_t now_key, uint64_t end_key, 
 Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
 {
     auto start = rdtscp();
-    return backend.get_cursor()
+    return backend.get(now_key)
         .then(
-            [=, &backend](StdMapBackend::Cursor cursor) mutable
-            {
-                return cursor.get(now_key);
-            })
-        .then(
-            [=, &backend, &latencies](auto pack) -> Future<void>
+            [=, &backend, &latencies](auto value) -> Future<void>
             {
                 auto end = rdtscp();
                 latencies[now_key] = end - start;
-
-                auto &&[cursor, value] = pack;
 
                 assert(std::to_string(now_key) == value);
 
@@ -239,7 +185,7 @@ int main(void)
 {
     std::vector<int64_t> latencies(N);
 
-    Eventloop::initialize_event_loops(THREAD_NUM);
+    Eventloop::initialize_event_loops(THREAD_NUM + BUCKET_NUM);
     StdMapBackend backend(BUCKET_NUM);
 
     Eventloop::get_loop(0).call_soon(
@@ -337,6 +283,11 @@ int main(void)
                                     // fout.close();
                                 });
                         ;
+                    })
+                .finally(
+                    []()
+                    {
+                        Eventloop::stop_loops();
                     });
         });
 
