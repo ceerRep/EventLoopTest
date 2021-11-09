@@ -181,11 +181,13 @@ Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uin
             });
 }
 
+#define REAL_THREAD_NUM (THREAD_NUM + BUCKET_NUM)
+
 int main(void)
 {
     std::vector<int64_t> latencies(N);
 
-    Eventloop::initialize_event_loops(THREAD_NUM + BUCKET_NUM);
+    Eventloop::initialize_event_loops(REAL_THREAD_NUM);
     StdMapBackend backend(BUCKET_NUM);
 
     Eventloop::get_loop(0).call_soon(
@@ -193,7 +195,7 @@ int main(void)
         {
             std::vector<Future<void>> futures;
 
-            for (int ind = 0; ind < THREAD_NUM; ind++)
+            for (int ind = 0; ind < REAL_THREAD_NUM; ind++)
                 futures.emplace_back(std::move(
                     submit_to(
                         ind,
@@ -205,8 +207,8 @@ int main(void)
                                 futures.emplace_back(std::move(
                                     do_set(
                                         backend,
-                                        N / THREAD_NUM * ind + i,
-                                        N / THREAD_NUM * (ind + 1),
+                                        N / REAL_THREAD_NUM * ind + i,
+                                        N / REAL_THREAD_NUM * (ind + 1),
                                         WORKER_PER_CORE)));
 
                             return when_all(futures.begin(), futures.end())
@@ -225,7 +227,7 @@ int main(void)
                     [&backend, &latencies]()
                     {
                         std::vector<Future<void>> futures;
-                        for (int ind = 0; ind < THREAD_NUM; ind++)
+                        for (int ind = 0; ind < REAL_THREAD_NUM; ind++)
                             futures.emplace_back(
                                 submit_to(
                                     ind,
@@ -238,8 +240,8 @@ int main(void)
                                                 do_get(
                                                     latencies,
                                                     backend,
-                                                    N / THREAD_NUM * ind + i,
-                                                    N / THREAD_NUM * (ind + 1),
+                                                    N / REAL_THREAD_NUM * ind + i,
+                                                    N / REAL_THREAD_NUM * (ind + 1),
                                                     WORKER_PER_CORE)));
 
                                         return when_all(futures.begin(), futures.end())
@@ -291,9 +293,9 @@ int main(void)
                     });
         });
 
-    for (int i = 0; i < THREAD_NUM; i++)
+    for (int i = 0; i < REAL_THREAD_NUM; i++)
         Eventloop::get_loop(i).run();
 
-    for (int i = 0; i < THREAD_NUM; i++)
+    for (int i = 0; i < REAL_THREAD_NUM; i++)
         Eventloop::get_loop(i).join();
 }
