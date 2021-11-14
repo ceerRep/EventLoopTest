@@ -1,5 +1,5 @@
-#define THREAD_NUM 4
-#define WORKER_PER_CORE 8
+#define THREAD_NUM 6
+#define WORKER_PER_CORE 2
 #define BUCKET_NUM 2
 #define N 100000000
 

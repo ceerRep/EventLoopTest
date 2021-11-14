@@ -123,7 +123,7 @@ public:
     }
 };
 
-static std::mutex mtx_setter;
+static boost::fibers::mutex mtx_setter;
 static std::size_t fiber_count{ 0 }, setter_count{0};
 static std::mutex mtx_count{};
 static boost::fibers::condition_variable_any cnd_count{}, cnd_setter{};
@@ -141,7 +141,7 @@ void worker(std::vector<uint64_t> &latencies, StdMapBackend& backend, uint64_t t
         for (int i = N / th_num * th_ind, end = N / th_num * (th_ind + 1); i < N; i++)
             backend.set(i, std::to_string(i));
         fmt::print("#{} Load done\n", th_ind);
-        lock_type lk(mtx_setter);
+        std::unique_lock<boost::fibers::mutex> lk(mtx_setter);
 
         if (0 == --setter_count) {
             lk.unlock();

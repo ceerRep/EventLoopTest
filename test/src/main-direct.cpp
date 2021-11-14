@@ -145,27 +145,43 @@ public:
 
 #include <config.hpp>
 
-Future<void> do_set(StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
+Future<void> __do_set(StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step, Promise<void> &&done)
 {
     return backend.set(now_key, std::to_string(now_key))
         .then(
-            [=, &backend]() -> Future<void>
+            [=, &backend, done = std::move(done)]() mutable
             {
                 auto next_key = now_key + step;
 
-                if (next_key >= end_key)
-                    return make_ready_future();
+                if (next_key < end_key)
+                    Eventloop::get_loop(Eventloop::get_cpu_index())
+                        .call_soon(
+                            [=, &backend, done = std::move(done)]() mutable
+                            { return __do_set(backend, next_key, end_key, step, std::move(done)); });
                 else
-                    return do_set(backend, next_key, end_key, step);
+                    done.resolve();
             });
 }
 
-Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
+Future<void> do_set(StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
+{
+    Promise<void> done;
+    auto fut = done.get_future();
+    Eventloop::get_loop(Eventloop::get_cpu_index())
+        .call_soon(
+            [=, &backend, done = std::move(done)]() mutable
+            { return __do_set(backend, now_key, end_key, step, std::move(done)); });
+
+    return fut;
+}
+
+Future<void> __do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step, Promise<void> &&done)
 {
     auto start = rdtscp();
+    // fmt::print("{} start\n", now_key);
     return backend.get(now_key)
         .then(
-            [=, &backend, &latencies](auto value) -> Future<void>
+            [=, &backend, &latencies, done = std::move(done)](auto value) mutable
             {
                 auto end = rdtscp();
                 latencies[now_key] = end - start;
@@ -174,14 +190,30 @@ Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uin
 
                 auto next_key = now_key + step;
 
-                if (next_key >= end_key)
-                    return make_ready_future();
+                if (next_key < end_key)
+                    Eventloop::get_loop(Eventloop::get_cpu_index())
+                        .call_soon(
+                            [=, &backend, &latencies, done = std::move(done)]() mutable
+                            { return __do_get(latencies, backend, next_key, end_key, step, std::move(done)); });
                 else
-                    return do_get(latencies, backend, next_key, end_key, step);
+                    done.resolve();
             });
 }
 
+Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
+{
+    Promise<void> done;
+    auto fut = done.get_future();
+    Eventloop::get_loop(Eventloop::get_cpu_index())
+        .call_soon(
+            [=, &backend, &latencies, done = std::move(done)]() mutable
+            { return __do_get(latencies, backend, now_key, end_key, step, std::move(done)); });
+
+    return fut;
+}
+
 #define REAL_THREAD_NUM (THREAD_NUM + BUCKET_NUM)
+#define REAL_WORKER_PER_CORE (WORKER_PER_CORE * THREAD_NUM / REAL_THREAD_NUM)
 
 int main(void)
 {
@@ -203,13 +235,13 @@ int main(void)
                         {
                             std::vector<Future<void>> futures;
 
-                            for (int i = 0; i < WORKER_PER_CORE; i++)
+                            for (int i = 0; i < REAL_WORKER_PER_CORE; i++)
                                 futures.emplace_back(std::move(
                                     do_set(
                                         backend,
                                         N / REAL_THREAD_NUM * ind + i,
                                         N / REAL_THREAD_NUM * (ind + 1),
-                                        WORKER_PER_CORE)));
+                                        REAL_WORKER_PER_CORE)));
 
                             return when_all(futures.begin(), futures.end())
                                 .then(
@@ -235,14 +267,14 @@ int main(void)
                                     {
                                         std::vector<Future<void>> futures;
 
-                                        for (int i = 0; i < WORKER_PER_CORE; i++)
+                                        for (int i = 0; i < REAL_WORKER_PER_CORE; i++)
                                             futures.emplace_back(std::move(
                                                 do_get(
                                                     latencies,
                                                     backend,
                                                     N / REAL_THREAD_NUM * ind + i,
                                                     N / REAL_THREAD_NUM * (ind + 1),
-                                                    WORKER_PER_CORE)));
+                                                    REAL_WORKER_PER_CORE)));
 
                                         return when_all(futures.begin(), futures.end())
                                             .then(

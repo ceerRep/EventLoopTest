@@ -3,7 +3,6 @@
 #define _FUTURE_HH
 
 #include <any>
-#include <fmt/core.h>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -14,9 +13,11 @@
 #include <type_traits>
 #include <typeinfo>
 #include <utility>
+#include <vector>
 
 #include <function2/function2.hpp>
-#include <vector>
+
+#include <fmt/core.h>
 
 #include "EventLoop.hh"
 #include "FutureBase.hh"
@@ -161,6 +162,7 @@ public:
 
         if (int current_loop = Eventloop::get_cpu_index(); loopno != current_loop)
         {
+            throw std::runtime_error(fmt::format("Resolving in wrong loop"));
             // Submit to correct loop
             Eventloop::get_loop(loopno).call_soon(
                 [pro = std::move(*this), args = std::tuple(std::move(args)...)]() mutable

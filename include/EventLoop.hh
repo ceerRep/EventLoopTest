@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <list>
 #include <map>
 #include <memory>
@@ -49,7 +50,7 @@ class Eventloop
 
     volatile bool running;
 
-    volatile int to_sleep;
+    volatile int to_sleep = 0;
     std::condition_variable cv;
     std::mutex cv_m;
 

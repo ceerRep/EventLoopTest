@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
-# set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O1 -g -fno-inline")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
@@ -54,11 +54,23 @@ add_executable (direct-model-test
 
 add_executable (boost-fiber-test
     test/src/boost-fiber-test.cpp
-    src/mimalloc-override.cc
+    # src/mimalloc-override.cc
 )
 
 target_include_directories(boost-fiber-test PUBLIC ${Boost_INCLUDE_DIR} )
 target_link_libraries(boost-fiber-test ${Boost_LIBRARIES})
+
+add_executable (std-thread-test
+    test/src/std-thread-test.cpp
+    src/mimalloc-override.cc
+    src/cpu.cpp
+)
+
+add_executable (std-thread-direct-test
+    test/src/std-thread-direct-test.cpp
+    src/mimalloc-override.cc
+    src/cpu.cpp
+)
 
 target_include_directories (async-model-test
     PUBLIC "${CMAKE_SOURCE_DIR}/test/include"
@@ -69,5 +81,13 @@ target_include_directories (direct-model-test
 )
 
 target_include_directories (boost-fiber-test
+    PUBLIC "${CMAKE_SOURCE_DIR}/test/include"
+)
+
+target_include_directories (std-thread-test
+    PUBLIC "${CMAKE_SOURCE_DIR}/test/include"
+)
+
+target_include_directories (std-thread-direct-test
     PUBLIC "${CMAKE_SOURCE_DIR}/test/include"
 )

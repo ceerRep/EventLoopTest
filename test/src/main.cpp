@@ -50,16 +50,16 @@ class StdMapBackend
 
     int bucket_num;
 
-    inline static bool running;
-    inline static std::vector<bucket> buckets;
-    inline static std::vector<std::thread> threads;
+    bool running;
+    std::vector<bucket> buckets;
+    std::vector<std::thread> threads;
 
-    inline static bucket &getBucketAt(int ind)
+    bucket &getBucketAt(int ind)
     {
         return buckets[ind];
     }
 
-    inline static bucket &getBucket()
+    bucket &getBucket()
     {
         return buckets[Eventloop::get_cpu_index()];
     }
@@ -181,28 +181,43 @@ public:
 
 #include <config.hpp>
 
-Future<void> do_set(StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
+Future<void> __do_set(StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step, Promise<void> &&done)
 {
     return backend.set(now_key, std::to_string(now_key))
         .then(
-            [=, &backend]() -> Future<void>
+            [=, &backend, done = std::move(done)]() mutable
             {
                 auto next_key = now_key + step;
 
-                if (next_key >= end_key)
-                    return make_ready_future();
+                if (next_key < end_key)
+                    Eventloop::get_loop(Eventloop::get_cpu_index())
+                        .call_soon(
+                            [=, &backend, done = std::move(done)]() mutable
+                            { return __do_set(backend, next_key, end_key, step, std::move(done)); });
                 else
-                    return do_set(backend, next_key, end_key, step);
+                    done.resolve();
             });
 }
 
-Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
+Future<void> do_set(StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
+{
+    Promise<void> done;
+    auto fut = done.get_future();
+    Eventloop::get_loop(Eventloop::get_cpu_index())
+        .call_soon(
+            [=, &backend, done = std::move(done)]() mutable
+            { return __do_set(backend, now_key, end_key, step, std::move(done)); });
+
+    return fut;
+}
+
+Future<void> __do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step, Promise<void> &&done)
 {
     auto start = rdtscp();
     // fmt::print("{} start\n", now_key);
     return backend.get(now_key)
         .then(
-            [=, &backend, &latencies](auto value) -> Future<void>
+            [=, &backend, &latencies, done = std::move(done)](auto value) mutable
             {
                 auto end = rdtscp();
                 latencies[now_key] = end - start;
@@ -211,11 +226,26 @@ Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uin
 
                 auto next_key = now_key + step;
 
-                if (next_key >= end_key)
-                    return make_ready_future();
+                if (next_key < end_key)
+                    Eventloop::get_loop(Eventloop::get_cpu_index())
+                        .call_soon(
+                            [=, &backend, &latencies, done = std::move(done)]() mutable
+                            { return __do_get(latencies, backend, next_key, end_key, step, std::move(done)); });
                 else
-                    return do_get(latencies, backend, next_key, end_key, step);
+                    done.resolve();
             });
+}
+
+Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step)
+{
+    Promise<void> done;
+    auto fut = done.get_future();
+    Eventloop::get_loop(Eventloop::get_cpu_index())
+        .call_soon(
+            [=, &backend, &latencies, done = std::move(done)]() mutable
+            { return __do_get(latencies, backend, now_key, end_key, step, std::move(done)); });
+
+    return fut;
 }
 
 int main(void)
