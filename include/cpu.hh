@@ -3,5 +3,6 @@
 #define _CPU_HH
 
 int assignToThisCore(int core_id);
+int assignToCores(int begin, int end);
 
 #endif

@@ -45,15 +45,18 @@ add_executable (event-loop-test
 add_executable (async-model-test 
     ${EVENTLOOP_SOURCE}
     test/src/main.cpp
+    test/src/init.cpp
 )
 
 add_executable (direct-model-test 
     ${EVENTLOOP_SOURCE}
     test/src/main-direct.cpp
+    test/src/init.cpp
 )
 
 add_executable (boost-fiber-test
     test/src/boost-fiber-test.cpp
+    test/src/init.cpp
     # src/mimalloc-override.cc
 )
 
@@ -62,12 +65,14 @@ target_link_libraries(boost-fiber-test ${Boost_LIBRARIES})
 
 add_executable (std-thread-test
     test/src/std-thread-test.cpp
+    test/src/init.cpp
     src/mimalloc-override.cc
     src/cpu.cpp
 )
 
 add_executable (std-thread-direct-test
     test/src/std-thread-direct-test.cpp
+    test/src/init.cpp
     src/mimalloc-override.cc
     src/cpu.cpp
 )

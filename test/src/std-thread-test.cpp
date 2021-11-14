@@ -166,7 +166,7 @@ volatile int loading_workers, running_workers;
 
 void worker(int id, uint64_t begin, uint64_t end, std::vector<uint64_t> &latencies)
 {
-    assignToThisCore(id % THREAD_NUM);
+    assignToCores(0, THREAD_NUM);
     fmt::print("#{} {} - {}\n", id, begin, end);
     for (int i = begin; i < end; i++)
         backend.set(i, std::to_string(i));
