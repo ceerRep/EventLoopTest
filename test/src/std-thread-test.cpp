@@ -211,6 +211,8 @@ int main(void)
     std::unique_lock lk_lw(lw_m), lk_rw(rw_m);
     loading_workers = running_workers = REAL_WORKER_NUM;
 
+    new (&backend) StdMapBackend(BUCKET_NUM);
+
     backend.start_worker_thread();
 
     std::vector<uint64_t> latencies(N, 0);
