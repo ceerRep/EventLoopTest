@@ -277,12 +277,12 @@ int main(void)
                         {
                             std::vector<Future<void>> futures;
 
-                            for (int workerno = 0; workerno * REAL_THREAD_NUM + ind < REAL_WORKER_NUM; workerno++)
+                            for (int i = 0; i * REAL_THREAD_NUM + ind < REAL_WORKER_NUM; i++)
                                 futures.emplace_back(std::move(
                                     do_set(
                                         backend,
-                                        N / REAL_WORKER_NUM * workerno,
-                                        N / REAL_WORKER_NUM * (workerno + 1),
+                                        N / REAL_WORKER_NUM * (i * REAL_THREAD_NUM + ind),
+                                        N / REAL_WORKER_NUM * ((i * REAL_THREAD_NUM + ind) + 1),
                                         1)));
 
                             return when_all(futures.begin(), futures.end())
@@ -309,13 +309,13 @@ int main(void)
                                     {
                                         std::vector<Future<void>> futures;
 
-                                        for (int workerno = 0; workerno * REAL_THREAD_NUM + ind < REAL_WORKER_NUM; workerno++)
+                                        for (int i = 0; i * REAL_THREAD_NUM + ind < REAL_WORKER_NUM; i++)
                                             futures.emplace_back(std::move(
                                                 do_get(
                                                     latencies,
                                                     backend,
-                                                    N / REAL_WORKER_NUM * workerno,
-                                                    N / REAL_WORKER_NUM * (workerno + 1),
+                                                    N / REAL_WORKER_NUM * (i * REAL_THREAD_NUM + ind),
+                                                    N / REAL_WORKER_NUM * ((i * REAL_THREAD_NUM + ind) + 1),
                                                     1)));
 
                                         return when_all(futures.begin(), futures.end())
