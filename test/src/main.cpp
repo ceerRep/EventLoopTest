@@ -282,7 +282,7 @@ int main(void)
                                         do_set(
                                             backend,
                                             N / REAL_WORKER_NUM * workerno,
-                                            N / REAL_THREAD_NUM * (workerno + 1),
+                                            N / REAL_WORKER_NUM * (workerno + 1),
                                             1)));
 
                             return when_all(futures.begin(), futures.end())
@@ -316,7 +316,7 @@ int main(void)
                                                         latencies,
                                                         backend,
                                                         N / REAL_WORKER_NUM * workerno,
-                                                        N / REAL_THREAD_NUM * (workerno + 1),
+                                                        N / REAL_WORKER_NUM * (workerno + 1),
                                                         1)));
 
                                         return when_all(futures.begin(), futures.end())
