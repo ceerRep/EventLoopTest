@@ -22,7 +22,7 @@ class StdMapBackend
     struct bucket
     {
         std::map<uint64_t, std::string> storage;
-        Spinlock lock;
+        std::mutex lock;
     };
 
     int bucket_num;
@@ -41,10 +41,6 @@ public:
 
     ~StdMapBackend()
     {
-        for (auto &bucket : buckets)
-        {
-            fmt::print("{}\n", bucket.storage.size());
-        }
     }
 
     std::string get(uint64_t key)
