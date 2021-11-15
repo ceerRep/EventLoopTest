@@ -17,6 +17,12 @@
 #include <Future.hh>
 #include <Semaphore.hh>
 
+#include <config.hpp>
+
+#define REAL_THREAD_NUM (THREAD_NUM - BUCKET_NUM)
+#define REAL_WORKER_NUM (THREAD_NUM * WORKER_PER_CORE)
+#define REAL_WORKER_PER_CORE ((REAL_WORKER_NUM + REAL_THREAD_NUM - 1) / REAL_THREAD_NUM)
+
 using namespace std::chrono_literals;
 
 struct
@@ -170,16 +176,18 @@ public:
     void start_worker_thread()
     {
         running = true;
-        for (auto &bucket : buckets)
+        for (int i = 0; i < buckets.size(); i++)
         {
+            auto &bucket = buckets[i];
             threads.emplace_back(
-                [this, &bucket]()
-                { worker(bucket, running); });
+                [this, &bucket, i]()
+                {
+                    assignToThisCore(THREAD_NUM - BUCKET_NUM + i);
+                    worker(bucket, running);
+                });
         }
     }
 };
-
-#include <config.hpp>
 
 Future<void> __do_set(StdMapBackend &backend, uint64_t now_key, uint64_t end_key, uint64_t step, Promise<void> &&done)
 {
@@ -252,7 +260,7 @@ int main(void)
 {
     std::vector<int64_t> latencies(N, -1);
 
-    Eventloop::initialize_event_loops(THREAD_NUM);
+    Eventloop::initialize_event_loops(REAL_THREAD_NUM);
     StdMapBackend backend(BUCKET_NUM);
 
     Eventloop::get_loop(0).call_soon(
@@ -260,7 +268,7 @@ int main(void)
         {
             std::vector<Future<void>> futures;
 
-            for (int ind = 0; ind < THREAD_NUM; ind++)
+            for (int ind = 0; ind < REAL_THREAD_NUM; ind++)
                 futures.emplace_back(std::move(
                     submit_to(
                         ind,
@@ -268,13 +276,14 @@ int main(void)
                         {
                             std::vector<Future<void>> futures;
 
-                            for (int i = 0; i < WORKER_PER_CORE; i++)
-                                futures.emplace_back(std::move(
-                                    do_set(
-                                        backend,
-                                        N / THREAD_NUM * ind + i,
-                                        N / THREAD_NUM * (ind + 1),
-                                        WORKER_PER_CORE)));
+                            for (int i = 0; i < REAL_WORKER_PER_CORE; i++)
+                                if (int workerno = ind * REAL_WORKER_PER_CORE + i; workerno < REAL_WORKER_NUM)
+                                    futures.emplace_back(std::move(
+                                        do_set(
+                                            backend,
+                                            N / REAL_WORKER_NUM * workerno,
+                                            N / REAL_THREAD_NUM * (workerno + 1),
+                                            1)));
 
                             return when_all(futures.begin(), futures.end())
                                 .then(
@@ -292,7 +301,7 @@ int main(void)
                     [&backend, &latencies]()
                     {
                         std::vector<Future<void>> futures;
-                        for (int ind = 0; ind < THREAD_NUM; ind++)
+                        for (int ind = 0; ind < REAL_THREAD_NUM; ind++)
                             futures.emplace_back(
                                 submit_to(
                                     ind,
@@ -300,14 +309,15 @@ int main(void)
                                     {
                                         std::vector<Future<void>> futures;
 
-                                        for (int i = 0; i < WORKER_PER_CORE; i++)
-                                            futures.emplace_back(std::move(
-                                                do_get(
-                                                    latencies,
-                                                    backend,
-                                                    N / THREAD_NUM * ind + i,
-                                                    N / THREAD_NUM * (ind + 1),
-                                                    WORKER_PER_CORE)));
+                                        for (int i = 0; i < REAL_WORKER_PER_CORE; i++)
+                                            if (int workerno = ind * REAL_WORKER_PER_CORE + i; workerno < REAL_WORKER_NUM)
+                                                futures.emplace_back(std::move(
+                                                    do_get(
+                                                        latencies,
+                                                        backend,
+                                                        N / REAL_WORKER_NUM * workerno,
+                                                        N / REAL_THREAD_NUM * (workerno + 1),
+                                                        1)));
 
                                         return when_all(futures.begin(), futures.end())
                                             .then(
@@ -359,9 +369,9 @@ int main(void)
                     });
         });
 
-    for (int i = 0; i < THREAD_NUM; i++)
+    for (int i = 0; i < REAL_THREAD_NUM; i++)
         Eventloop::get_loop(i).run();
 
-    for (int i = 0; i < THREAD_NUM; i++)
+    for (int i = 0; i < REAL_THREAD_NUM; i++)
         Eventloop::get_loop(i).join();
 }
