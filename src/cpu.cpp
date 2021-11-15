@@ -7,7 +7,7 @@
 
 static int cores = std::thread::hardware_concurrency();
 
-#define TRANSFORM(x) ((x) >= cores / 2 ? (x) * 2 : ((x) - cores / 2) * 2 + 1)
+#define TRANSFORM(x) ((x) < cores / 2 ? (x) * 2 : ((x) - cores / 2) * 2 + 1)
 
 int assignToThisCore(int core_id)
 {
@@ -19,7 +19,6 @@ int assignToThisCore(int core_id)
 
 int assignToCores(int begin, int end)
 {
-
     thread_local cpu_set_t mask;
     CPU_ZERO(&mask);
 
