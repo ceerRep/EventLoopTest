@@ -259,6 +259,7 @@ Future<void> do_get(std::vector<int64_t> &latencies, StdMapBackend &backend, uin
 int main(void)
 {
     std::vector<int64_t> latencies(N, -1);
+    fmt::print("{} {} {}\n", REAL_THREAD_NUM, REAL_WORKER_PER_CORE, REAL_WORKER_NUM);
 
     Eventloop::initialize_event_loops(REAL_THREAD_NUM);
     StdMapBackend backend(BUCKET_NUM);
@@ -276,14 +277,13 @@ int main(void)
                         {
                             std::vector<Future<void>> futures;
 
-                            for (int i = 0; i < REAL_WORKER_PER_CORE; i++)
-                                if (int workerno = ind * REAL_WORKER_PER_CORE + i; workerno < REAL_WORKER_NUM)
-                                    futures.emplace_back(std::move(
-                                        do_set(
-                                            backend,
-                                            N / REAL_WORKER_NUM * workerno,
-                                            N / REAL_WORKER_NUM * (workerno + 1),
-                                            1)));
+                            for (int workerno = 0; workerno * REAL_THREAD_NUM + ind < REAL_WORKER_NUM; workerno++)
+                                futures.emplace_back(std::move(
+                                    do_set(
+                                        backend,
+                                        N / REAL_WORKER_NUM * workerno,
+                                        N / REAL_WORKER_NUM * (workerno + 1),
+                                        1)));
 
                             return when_all(futures.begin(), futures.end())
                                 .then(
@@ -309,15 +309,14 @@ int main(void)
                                     {
                                         std::vector<Future<void>> futures;
 
-                                        for (int i = 0; i < REAL_WORKER_PER_CORE; i++)
-                                            if (int workerno = ind * REAL_WORKER_PER_CORE + i; workerno < REAL_WORKER_NUM)
-                                                futures.emplace_back(std::move(
-                                                    do_get(
-                                                        latencies,
-                                                        backend,
-                                                        N / REAL_WORKER_NUM * workerno,
-                                                        N / REAL_WORKER_NUM * (workerno + 1),
-                                                        1)));
+                                        for (int workerno = 0; workerno * REAL_THREAD_NUM + ind < REAL_WORKER_NUM; workerno++)
+                                            futures.emplace_back(std::move(
+                                                do_get(
+                                                    latencies,
+                                                    backend,
+                                                    N / REAL_WORKER_NUM * workerno,
+                                                    N / REAL_WORKER_NUM * (workerno + 1),
+                                                    1)));
 
                                         return when_all(futures.begin(), futures.end())
                                             .then(

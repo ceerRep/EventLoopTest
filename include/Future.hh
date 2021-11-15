@@ -301,6 +301,8 @@ inline Future<Value> &Future<Value>::operator=(Future<Value> &&fut)
     return *this;
 }
 
+Future<void> make_ready_future();
+
 template <typename Iterator>
 [[nodiscard]] Future<void> when_all(Iterator begin, Iterator end)
 {
@@ -313,6 +315,9 @@ template <typename Iterator>
         vct->emplace_back(std::move(*begin));
         begin++;
     }
+
+    if (vct->size() == 0)
+        return make_ready_future();
 
     std::shared_ptr<int> counter = std::make_shared<int>(vct->size());
     std::shared_ptr<Promise<void>> promise = std::make_shared<Promise<void>>();
