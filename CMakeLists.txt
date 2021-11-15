@@ -72,7 +72,7 @@ add_executable (std-thread-test
 
 add_executable (std-thread-direct-test
     test/src/std-thread-direct-test.cpp
-    test/src/init.cpp
+    test/src/init.cpp   
     src/mimalloc-override.cc
     src/cpu.cpp
 )

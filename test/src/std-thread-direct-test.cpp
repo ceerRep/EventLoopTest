@@ -114,12 +114,12 @@ void worker(int id, uint64_t begin, uint64_t end, std::vector<uint64_t> &latenci
     for (int i = begin; i < end; i++)
     {
         auto st = rdtscp();
-        // auto value = backend.get(i);
+        auto value = backend.get(i);
         auto ed = rdtscp();
 
         latencies[i] = ed - st;
 
-        // assert(std::to_string(i) == value);
+        assert(std::to_string(i) == value);
     }
 
     fmt::print("#{} Get Done\n", id);
