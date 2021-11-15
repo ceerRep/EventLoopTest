@@ -17,6 +17,9 @@
 
 #include <config.hpp>
 
+#define REAL_WORKER_NUM (THREAD_NUM * WORKER_PER_CORE)
+#define REAL_THREAD_NUM (THREAD_NUM - BUCKET_NUM)
+
 class StdMapBackend
 {
     struct request
@@ -53,7 +56,7 @@ class StdMapBackend
 
     void worker(int id, bucket &bucket, bool &running)
     {
-        assignToThisCore(THREAD_NUM + id);
+        assignToThisCore(REAL_THREAD_NUM + id);
         request req;
         while (running)
         {
@@ -156,8 +159,6 @@ public:
     }
 };
 
-#define REAL_WORKER_NUM (THREAD_NUM * WORKER_PER_CORE)
-
 StdMapBackend backend(BUCKET_NUM);
 
 std::mutex lw_m, rw_m;
@@ -166,7 +167,7 @@ volatile int loading_workers, running_workers;
 
 void worker(int id, uint64_t begin, uint64_t end, std::vector<uint64_t> &latencies)
 {
-    assignToCores(0, THREAD_NUM);
+    assignToCores(0, REAL_THREAD_NUM);
     fmt::print("#{} {} - {}\n", id, begin, end);
     for (int i = begin; i < end; i++)
         backend.set(i, std::to_string(i));

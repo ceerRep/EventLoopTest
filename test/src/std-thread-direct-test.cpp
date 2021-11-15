@@ -14,7 +14,6 @@
 
 #include <config.hpp>
 
-#define REAL_THREAD_NUM (THREAD_NUM + BUCKET_NUM)
 #define REAL_WORKER_NUM (THREAD_NUM * WORKER_PER_CORE)
 
 class StdMapBackend
@@ -85,7 +84,7 @@ volatile int loading_workers, running_workers;
 
 void worker(int id, uint64_t begin, uint64_t end, std::vector<uint64_t> &latencies)
 {
-    assignToCores(0, REAL_THREAD_NUM);
+    assignToCores(0, THREAD_NUM);
     fmt::print("#{} {} - {}\n", id, begin, end);
     for (int i = begin; i < end; i++)
         backend.set(i, std::to_string(i));
